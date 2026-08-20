@@ -1,214 +1,394 @@
+"""
+Entry point for running the project's modules against either a live camera or a recorded video.
+Imports ONLY from each module's public interface.py — all camera/video input handling and
+module selection/wiring lives here in the root entry point, not inside any module itself.
+
+--modules selects which pipeline runs per frame:
+    estop        Emergency Stop only (full-frame runway/collision logic).
+    wave_facing  Human detection -> per-person Wave Gesture + Facing-Camera Gate (the ORIGINAL
+                 demo pipeline, whole-frame human detection, no identity verification).
+    both         Both of the above, independently, on the SAME frame each iteration.
+    face_first   The face-first exploratory pipeline from plans/01-04: face detect+match
+                 (modules.face_identity) -> ROI-scoped human detection (modules.human_detection_roi)
+                 -> ONE of three interchangeable gesture methods (--gesture-method), per matched
+                 person. TRIGGER = registered_person (implied True, a face already matched) AND
+                 is_waving from the chosen gesture method. This is the pipeline plans/01-04 describe.
+
+Bbox color for wave_facing/both (only drawn with --show): GREEN once both is_waving and
+is_facing_camera are GREEN (confirmed), YELLOW while either signal is still building, RED
+otherwise. For face_first: GREEN means TRIGGER=True, YELLOW means confirmation is building, RED
+otherwise.
+
+Standalone single-module test/visualization scripts (all support --show, some chain live with
+their own upstream modules where the module's own spec calls for it — see each script's
+docstring): modules/emergency_stop/test_estop.py, modules/human_detection/test_human_detection.py,
+modules/wave_facing_gate/test_wave_facing.py, modules/face_identity/{test_face_identity,
+visualize_face_identity}.py, modules/human_detection_roi/{test_human_detection_roi,
+visualize_human_detection_roi}.py, modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,
+visualize_gesture_hand_keypoint}.py, modules/gesture_trajectory_verifier/
+{test_gesture_trajectory_verifier,visualize_gesture_trajectory_verifier}.py. This file (main.py)
+is the general runner that combines modules for actual multi-module/multi-person operation.
+
+Usage:
+    python main.py --mode camera --modules estop
+    python main.py --mode camera --modules wave_facing --show --debug
+    python main.py --mode camera --modules face_first --gesture-method hand_keypoint --show
+    python main.py --mode video --video path.mp4 --modules face_first --gesture-method trajectory_verifier --show
+"""
+import argparse
+import os
 import sys
 import time
-import yaml
-import logging
-import argparse
-import threading
+
 import cv2
-from typing import Optional
+import yaml
 
-from src.registration import TargetRegistrar
-from src.pipeline import FollowPipeline
-from src.camera_utils import configure_capture
+from modules.emergency_stop.interface import EmergencyStopModule
+from modules.human_detection.interface import HumanDetectionModule
+from modules.wave_facing_gate.interface import WaveFacingGateModule
 
-# Configure standard python logging (DO NOT use print())
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
+_ESTOP_COLOR = {"GO": (0, 200, 0), "STOP": (0, 0, 255), "UNCERTAIN": (0, 220, 255)}
+_WAVE_STATE_COLOR = {"RED": (0, 0, 255), "YELLOW": (0, 220, 255), "GREEN": (0, 200, 0)}
 
 
-class WebcamStreamThread:
-    """
-    Non-blocking multi-threaded camera frame reader.
-    Continuously grabs frames in a background thread to eliminate camera I/O wait latency.
-    """
-    def __init__(self, camera_index: int, input_resolution: Optional[list] = None, flip_horizontal: bool = False):
-        self.camera_index = camera_index
-        self.input_resolution = input_resolution
-        self.flip_horizontal = flip_horizontal
-        self.cap = cv2.VideoCapture(camera_index)
-        self.running = False
-        self.frame = None
-        self.ret = False
-        self.lock = threading.Lock()
-
-    def start(self):
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Camera index {self.camera_index} failed to open. Check webcam connection.")
-        if self.input_resolution and len(self.input_resolution) == 2:
-            configure_capture(self.cap, int(self.input_resolution[0]), int(self.input_resolution[1]))
-        self.running = True
-        self.thread = threading.Thread(target=self._update_loop, daemon=True)
-        self.thread.start()
-        return self
-
-    def _update_loop(self):
-        while self.running:
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
-                if self.flip_horizontal:
-                    frame = cv2.flip(frame, 1)
-                if self.input_resolution and len(self.input_resolution) == 2:
-                    rw, rh = int(self.input_resolution[0]), int(self.input_resolution[1])
-                    frame = cv2.resize(frame, (rw, rh), interpolation=cv2.INTER_LINEAR)
-                with self.lock:
-                    self.frame = frame
-                    self.ret = ret
-            else:
-                time.sleep(0.005)
-
-    def read(self):
-        with self.lock:
-            if self.frame is None:
-                return False, None
-            return self.ret, self.frame.copy()
-
-    def stop(self):
-        self.running = False
-        if hasattr(self, "thread") and self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-        if self.cap and self.cap.isOpened():
-            self.cap.release()
+def wave_bbox_color(wave_result):
+    """GREEN once both signals are confirmed, YELLOW while either is still building, else RED."""
+    if wave_result.is_waving and wave_result.is_facing_camera:
+        return _WAVE_STATE_COLOR["GREEN"]
+    if "YELLOW" in (wave_result.waving_state, wave_result.facing_state):
+        return _WAVE_STATE_COLOR["YELLOW"]
+    return _WAVE_STATE_COLOR["RED"]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="CV Follow-Me Module (Stage 1 & Stage 2)")
-    parser.add_argument("--mode", type=str, choices=["capture", "register", "run"], default="run",
-                        help="Operating mode: 'capture' (Phase 1 raw data), 'register' (Phase 1+2), or 'run' (Stage 2 tracking)")
-    parser.add_argument("--config", type=str, default="config/settings.yaml",
-                        help="Path to YAML settings file")
-    parser.add_argument("--ui", action="store_true",
-                        help="Show the debug overlay window (bboxes, ROI region, telemetry). "
-                             "Default is headless/background (no window) — the intended mode "
-                             "for unattended/production runs; pass --ui only for local debugging.")
-    args = parser.parse_args()
-
-    # Load configuration
+def load_camera_config(config_path: str = "config/thresholds.yaml") -> int:
+    """Load camera_index from config/thresholds.yaml's camera section, defaulting to 0."""
+    if not os.path.exists(config_path):
+        return 0
     try:
-        with open(args.config, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-    except Exception as e:
-        logger.error(f"Failed to load config file at '{args.config}': {e}")
-        sys.exit(1)
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        camera_config = config.get("camera", {})
+        return camera_config.get("camera_index", 0)
+    except Exception:
+        return 0
 
-    if args.mode == "capture":
-        from src.registration import RawDataCapturer
-        logger.info("Executing Phase 1: Raw Data Capture...")
-        try:
-            capturer = RawDataCapturer(config)
-            sanitized_name = capturer.run()
-            logger.info(f"Phase 1 Raw Data Capture completed successfully for '{sanitized_name}'!")
-        except Exception as e:
-            logger.error(f"Capture failed: {e}")
-            sys.exit(1)
 
-    elif args.mode == "register":
-        from src.registration import TargetRegistrar
-        logger.info("Executing Stage 1: Target Registration (Phase 1 Capture + Phase 2 Build)...")
-        try:
-            registrar = TargetRegistrar(config)
-            saved_path = registrar.run()
-            logger.info(f"Stage 1 Registration completed successfully! Saved to '{saved_path}'")
-        except Exception as e:
-            logger.error(f"Registration failed: {e}")
-            sys.exit(1)
+def draw_lines(frame, lines, start_y: int, color, line_height: int = 26) -> int:
+    """Draws each string in `lines` on its own row starting at `start_y`; returns the y position
+    just below the last line, so callers can stack multiple modules' overlays without overlap."""
+    y = start_y
+    for text in lines:
+        cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        y += line_height
+    return y
 
-    elif args.mode == "run":
-        # Person selection happens BEFORE anything pipeline/camera-related is touched. The
-        # selector itself auto-redirects to a fresh registration if the registry is empty — see
-        # PersonRegistrySelector.run(). If the user closes it without picking anyone, exit
-        # cleanly here rather than falling through to run() with no/stale reference data.
-        from src.person_selector import PersonRegistrySelector
-        selector = PersonRegistrySelector(config, config_path=args.config)
-        selected_path = selector.run()
-        if not selected_path:
-            logger.error("No person selected from the registry. Exiting.")
-            sys.exit(1)
 
-        logger.info(f"Executing Stage 2: Multi-Threaded Follow-Me Pipeline (target: '{selected_path}')...")
-        try:
-            pipeline = FollowPipeline(config_path=args.config, reference_npz_path=selected_path)
-        except Exception as e:
-            logger.error(f"Failed to initialize FollowPipeline: {e}")
-            sys.exit(1)
+def open_capture(args: argparse.Namespace):
+    if args.mode == "camera":
+        cap = cv2.VideoCapture(args.camera_index)
+        source_desc = f"camera index {args.camera_index}"
+    else:
+        cap = cv2.VideoCapture(args.video)
+        source_desc = f"video '{args.video}'"
+    return cap, source_desc
 
-        camera_index = config.get("camera_index", 0)
-        input_res = config.get("input_resolution", [640, 480])
-        flip_horiz = config.get("flip_horizontal", False)
 
-        try:
-            cam_stream = WebcamStreamThread(camera_index, input_res, flip_horizontal=flip_horiz).start()
-            logger.info(f"Started multi-threaded camera reader thread on camera index {camera_index} (flip_horizontal={flip_horiz})")
-        except Exception as e:
-            logger.error(f"Failed to start camera stream thread: {e}")
-            pipeline.close()
-            sys.exit(1)
+class _GestureMethodAdapter:
+    """
+    Normalizes the calling-convention difference between modules.wave_facing_gate ("condition" —
+    Method 1, predates the plans' shared GestureMethodResult contract, has its own two-signal
+    is_waving/is_facing_camera output) and modules.gesture_hand_keypoint / .gesture_trajectory_verifier
+    ("hand_keypoint" / "trajectory_verifier" — Methods 2/3, share the plans' GestureMethodResult
+    contract exactly). Lets run_face_first_pipeline() call any of the three the same way.
+    """
 
-        # Debug overlay window is entirely opt-in via --ui. Import lazily so the default
-        # (headless/background) run path never touches cv2's GUI-drawing code at all.
-        window_name = "Stage 2: CV Follow-Me Pipeline (Debug UI)"
-        if args.ui:
-            from src.debug_overlay import render as render_debug_overlay
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            logger.info("Debug UI enabled (--ui): showing bboxes, ROI region, and telemetry overlay.")
+    def __init__(self, method_name: str):
+        self.method_name = method_name
+        self._last_result = None  # stashed by evaluate(), consumed by draw_debug()
+        if method_name == "condition":
+            self._module = WaveFacingGateModule()
+        elif method_name == "hand_keypoint":
+            import modules.gesture_hand_keypoint.interface as gi
+            self._module = gi
+        elif method_name == "trajectory_verifier":
+            import modules.gesture_trajectory_verifier.interface as gi
+            self._module = gi
         else:
-            logger.info("Running headless (no --ui): no window shown, state visible via periodic log lines.")
+            raise ValueError(f"Unknown gesture method '{method_name}'")
 
-        # FPS calculation metrics
-        frame_count = 0
-        fps_start_time = time.time()
-        current_fps = 0.0
+    def evaluate(self, track_id: int, crop, timestamp: float, person_bbox_full_frame=None):
+        """Returns (is_waving, waving_state, extra_debug_label). `person_bbox_full_frame` is
+        only used by hand_keypoint (its palm-height gate needs the person's full-frame bbox,
+        not just the crop) — ignored by the other two methods. Also stashes the raw result
+        object for draw_debug() below, since the tuple return here is print/state-only."""
+        if self.method_name == "condition":
+            r = self._module.process_frame(track_id=track_id, crop=crop)
+            extra = f"facing={r.facing_state} wave_arm={r.wave_arm}"
+            self._last_result = r
+            return r.is_waving, r.waving_state, extra
 
-        try:
-            while True:
-                ret, frame = cam_stream.read()
+        if self.method_name == "hand_keypoint":
+            r = self._module.evaluate(track_id, crop, timestamp, person_bbox_full_frame=person_bbox_full_frame)
+            extra = f"conf={r.confidence_debug} stage={r.sequence_stage} palm_facing={r.palm_facing_camera_debug}"
+        else:  # trajectory_verifier
+            r = self._module.evaluate(track_id, crop, timestamp)
+            extra = f"conf={r.confidence_debug} ref={r.matched_reference_id} arm={r.arm} refs={r.reference_count}"
+        self._last_result = r
+        return r.is_waving, r.waving_state, extra
 
-                # Frame decode error handling: skip frame, log warning, do not crash loop
-                if not ret or frame is None:
-                    time.sleep(0.005)
+    def draw_debug(self, crop, person_bbox_full_frame=None) -> None:
+        """Draws the last evaluate() call's per-method debug overlay directly onto `crop` (a view
+        into the caller's frame) — same overlay each method's own standalone visualize_*.py
+        script draws. No-ops if the method has no draw_debug (gesture_trajectory_verifier
+        doesn't define one yet) or nothing has been evaluated this track yet."""
+        if self._last_result is None or not hasattr(self._last_result, "draw_debug"):
+            return
+        if self.method_name == "hand_keypoint":
+            self._last_result.draw_debug(crop, person_bbox_full_frame=person_bbox_full_frame)
+        else:
+            self._last_result.draw_debug(crop)
+
+    def release_track(self, track_id: int) -> None:
+        if self.method_name == "condition":
+            self._module.reset_track(track_id)
+        else:
+            self._module.release_track(track_id)
+
+
+def run_legacy_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
+    """--modules estop | wave_facing | both — the original whole-frame-detection demo pipeline,
+    no identity verification."""
+    run_estop = args.modules in ("estop", "both")
+    run_wave_facing = args.modules in ("wave_facing", "both")
+
+    estop = EmergencyStopModule() if run_estop else None
+    human_detector = HumanDetectionModule() if run_wave_facing else None
+    wave_facing = WaveFacingGateModule() if run_wave_facing else None
+
+    frame_idx = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_h, frame_w = frame.shape[:2]
+            line = f"frame={frame_idx:06d}"
+            overlay_y = 30
+
+            if estop is not None:
+                estop_output = estop.process_frame(frame)
+                line += (
+                    f" estop.decision={estop_output.decision.value:9s} "
+                    f"estop.reason={estop_output.reason:28s} "
+                    f"estop.track_id={str(estop_output.triggering_track_id):>6s} "
+                    f"estop.zone={str(estop_output.zone):5s} "
+                    f"estop.latency_ms={estop.last_latency_ms:6.1f}"
+                )
+                if args.show:
+                    color = _ESTOP_COLOR[estop_output.decision.value]
+                    overlay_y = draw_lines(frame, [
+                        f"ESTOP: {estop_output.decision.value} ({estop_output.reason})",
+                        f"  track_id={estop_output.triggering_track_id} zone={estop_output.zone}",
+                    ], overlay_y, color)
+
+            if human_detector is not None and wave_facing is not None:
+                detections = human_detector.detect(frame)
+                line += f" people={len(detections):2d} human_detection.latency_ms={human_detector.last_latency_ms:6.1f}"
+                if args.show:
+                    overlay_y = draw_lines(frame, [f"PEOPLE: {len(detections)} detected"], overlay_y, (255, 255, 255))
+
+                for det in detections:
+                    x1, y1, x2, y2 = [int(v) for v in det.bbox]
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(frame_w, x2), min(frame_h, y2)
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    crop = frame[y1:y2, x1:x2]  # a VIEW into frame — drawing on it updates frame in place
+
+                    wave_result = wave_facing.process_frame(track_id=det.track_id, crop=crop)
+                    line += (
+                        f" | person(track_id={det.track_id} bbox=({x1},{y1},{x2},{y2}) conf={det.confidence:.2f} "
+                        f"is_waving={wave_result.is_waving} is_facing={wave_result.is_facing_camera} "
+                        f"waving_state={wave_result.waving_state} facing_state={wave_result.facing_state} "
+                        f"wave_arm={wave_result.wave_arm} facing_conf_min={wave_result.facing_confidence_min} "
+                        f"wave.latency_ms={wave_facing.last_latency_ms:.1f})"
+                    )
+
+                    if args.show:
+                        color = wave_bbox_color(wave_result)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        label = f"id={det.track_id} wave={wave_result.waving_state} facing={wave_result.facing_state}"
+                        cv2.putText(frame, label, (x1, max(15, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        if args.debug:
+                            wave_result.draw_debug(crop)
+
+            print(line)
+
+            if args.show:
+                cv2.imshow("main", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            frame_idx += 1
+    finally:
+        cap.release()
+        if args.show:
+            cv2.destroyAllWindows()
+
+    print(f"Processed {frame_idx} frames from {source_desc}.")
+    return 0
+
+
+def run_face_first_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
+    """
+    --modules face_first — the exploratory pipeline from plans/01-04:
+        full frame -> face detect+match -> ROI-scoped human detection -> chosen gesture method
+    TRIGGER = registered_person (a face already matched a registry entry) AND is_waving from the
+    chosen gesture method. Multiple registered people in the same frame are all evaluated
+    independently (face_identity.evaluate() already returns a list, spec §1: it does not pick
+    "the" person).
+    """
+    from modules.face_identity.interface import FaceRegistry, evaluate as evaluate_face
+    from modules.human_detection_roi.interface import evaluate as evaluate_person
+
+    face_registry = FaceRegistry(args.face_registry_dir)
+    gesture = _GestureMethodAdapter(args.gesture_method)
+    active_track_ids = set()
+
+    frame_idx = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            timestamp = time.time()
+            frame_h, frame_w = frame.shape[:2]
+
+            face_results = [r for r in evaluate_face(frame, face_registry) if r.is_registered_match]
+            line = f"frame={frame_idx:06d} faces_matched={len(face_results)}"
+            seen_track_ids = set()
+
+            for face in face_results:
+                person = evaluate_person(frame, face.face_bbox)
+                if not person.person_found:
+                    line += f" | {face.matched_person_name}: person_not_found"
                     continue
 
-                # Process frame via multi-threaded pipeline
-                angle_result = pipeline.process_frame(frame)
+                px, py, pw, ph = person.person_bbox
+                px, py = max(0, px), max(0, py)
+                pw = min(pw, frame_w - px)
+                ph = min(ph, frame_h - py)
+                if pw <= 0 or ph <= 0:
+                    continue
+                crop = frame[py:py + ph, px:px + pw]  # a VIEW into frame — drawing on it updates frame in place
 
-                if args.ui:
-                    display = render_debug_overlay(frame, pipeline, angle_result, current_fps)
-                    cv2.imshow(window_name, display)
+                # human_detection_roi is ROI-scoped, stateless per call — no persistent
+                # track_id (a per-frame-shifting ROI crop doesn't give ByteTrack a stable
+                # coordinate frame to track against). Key gesture-method state off the
+                # registered person's name instead — stable across frames on its own, since the
+                # same name only ever maps to one physical person.
+                track_id = abs(hash(face.matched_person_name)) % 100000
+                seen_track_ids.add(track_id)
+                is_waving, waving_state, extra = gesture.evaluate(
+                    track_id, crop, timestamp, person_bbox_full_frame=(px, py, pw, ph),
+                )
+                trigger = is_waving  # registered_person already implied True (face matched above)
 
-                # Measuring real FPS & logging once per second — this is the "what is the
-                # pipeline doing" signal in headless mode, so it includes ROI/mode state too.
-                frame_count += 1
-                elapsed = time.time() - fps_start_time
-                if elapsed >= 1.0:
-                    current_fps = frame_count / elapsed
-                    roi_state = "ROI" if pipeline.last_used_roi else "FULL-FRAME"
-                    timing = pipeline.last_timing_ms
-                    logger.info(
-                        f"Performance: FPS = {current_fps:.2f} | Target Found = {angle_result.target_found} | "
-                        f"Detect = {roi_state} | ROIFail = {pipeline._roi_failure_count}/{pipeline.roi_failure_max_frames} | "
-                        f"Timing(ms) detect={timing['detect_ms']:.1f} verify={timing['verify_ms']:.1f} "
-                        f"total={timing['total_ms']:.1f}"
+                line += (
+                    f" | {face.matched_person_name}: is_waving={is_waving} state={waving_state} "
+                    f"TRIGGER={trigger} bbox=({px},{py},{pw},{ph}) ({extra})"
+                )
+
+                if args.show:
+                    if args.debug:
+                        gesture.draw_debug(crop, person_bbox_full_frame=(px, py, pw, ph))
+                    color = _WAVE_STATE_COLOR["GREEN"] if trigger else (
+                        _WAVE_STATE_COLOR["YELLOW"] if waving_state == "YELLOW" else _WAVE_STATE_COLOR["RED"]
                     )
-                    frame_count = 0
-                    fps_start_time = time.time()
+                    cv2.rectangle(frame, (px, py), (px + pw, py + ph), color, 2)
+                    label = f"{face.matched_person_name}: {waving_state}" + ("  TRIGGER!" if trigger else "")
+                    cv2.putText(frame, label, (px, max(15, py - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-                if args.ui:
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        logger.info("Exiting pipeline on user command ('q' pressed).")
-                        break
+            # Release gesture-method state for tracks that dropped out this frame (face no
+            # longer matched/found) — bounds memory, mirrors each method's own reset_track/
+            # release_track hygiene hook.
+            for stale_id in active_track_ids - seen_track_ids:
+                gesture.release_track(stale_id)
+            active_track_ids = seen_track_ids
 
-        except KeyboardInterrupt:
-            logger.info("Interrupted by user (Ctrl+C). Shutting down...")
+            print(line)
 
-        finally:
-            cam_stream.stop()
-            pipeline.close()
-            if args.ui:
-                cv2.destroyAllWindows()
+            if args.show:
+                cv2.imshow("main (face-first pipeline)", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            frame_idx += 1
+    finally:
+        cap.release()
+        if args.show:
+            cv2.destroyAllWindows()
+
+    print(f"Processed {frame_idx} frames from {source_desc}.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Run project modules against a live camera or a recorded video."
+    )
+    parser.add_argument(
+        "--mode", choices=["camera", "video"], required=True,
+        help="Input source: 'camera' for a live webcam, 'video' for a recorded file.",
+    )
+    parser.add_argument("--video", help="Path to a recorded video file. Required when --mode video.")
+
+    config_camera_index = load_camera_config("config/thresholds.yaml")
+    parser.add_argument(
+        "--camera-index", type=int, default=config_camera_index,
+        help=f"OS camera device index (default {config_camera_index} from config, or 0 if not set). Used when --mode camera.",
+    )
+    parser.add_argument(
+        "--modules", choices=["estop", "wave_facing", "both", "face_first"], default="estop",
+        help="Which pipeline to run: 'estop'/'wave_facing'/'both' are the original whole-frame "
+             "demo pipeline; 'face_first' is the face-first exploratory pipeline from "
+             "plans/01-04 (requires --gesture-method). Default: estop.",
+    )
+    parser.add_argument(
+        "--gesture-method", choices=["condition", "hand_keypoint", "trajectory_verifier"],
+        help="Which gesture method the face_first pipeline uses: 'condition' = Method 1 "
+             "(modules.wave_facing_gate), 'hand_keypoint' = Method 2, 'trajectory_verifier' = "
+             "Method 3. Required when --modules face_first.",
+    )
+    parser.add_argument(
+        "--face-registry-dir", default="modules/face_identity/registry_data",
+        help="Path to the face_identity registry directory. Used when --modules face_first.",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Enable per-person debug overlay (keypoints/skeleton/gate state), drawn by whichever "
+             "module is active: wave_facing's own pose debug for --modules wave_facing/both, or the "
+             "chosen --gesture-method's draw_debug() for --modules face_first (no-op for "
+             "trajectory_verifier, which doesn't define one).",
+    )
+    parser.add_argument("--show", action="store_true", help="Display frames in a window while processing.")
+    args = parser.parse_args()
+
+    if args.mode == "video" and not args.video:
+        parser.error("--video is required when --mode video")
+    if args.modules == "face_first" and not args.gesture_method:
+        parser.error("--gesture-method is required when --modules face_first")
+
+    cap, source_desc = open_capture(args)
+    if not cap.isOpened():
+        print(f"ERROR: could not open {source_desc}", file=sys.stderr)
+        return 1
+
+    if args.modules == "face_first":
+        return run_face_first_pipeline(cap, args, source_desc)
+    return run_legacy_pipeline(cap, args, source_desc)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

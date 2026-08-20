@@ -9,38 +9,6 @@ onnxruntime>=1.15.0
 onnxslim>=0.1.0
 lapx>=0.9.0
 Pillow>=10.0.0
-
-# --- torchreid (OSNet person re-id, used by src/verifier.py) ---
-# `torchreid` is intentionally NOT `pip install`-able from this file: the PyPI package named
-# "torchreid" is an unofficial third-party fork with no declared dependencies — confirmed by
-# testing: `pip install torchreid` succeeds but `import torchreid` then fails with
-# `ModuleNotFoundError: No module named 'scipy'`. The canonical source
-# (KaiyangZhou/deep-person-reid) also cannot be `pip install -e .`'d on modern pip/setuptools:
-# its setup.py needs numpy+Cython at BUILD time to compile an optional Cython-accelerated eval
-# extension, but pip's isolated build env doesn't have them and nothing declares that
-# requirement. See README.md "Cài torchreid" for the exact install steps actually used (clone
-# + install these runtime deps + copy the package folder directly into site-packages, skipping
-# the broken Cython-extension build — torchreid's own code already falls back to a pure-Python
-# eval path with just a warning when that extension is absent, confirmed at runtime).
-scipy
-h5py
-six
-matplotlib
-tb-nightly
-future
-yacs
-gdown
-imageio
-chardet
-
-# --- MoveNet Lightning pose estimation (demo_wave_trigger.py — Quick Demo Spec: Wave + Facing
-# Trigger Gate). MoveNet has no official PyTorch release; TF Hub is the documented runtime
-# (see Project_Master_Doc.md muc 3) and loads the model directly ("hub.load(...)") instead of
-# a manually-downloaded .tflite file, the same auto-download-on-first-use pattern already used
-# by Ultralytics elsewhere in this project (see src/detector.py).
-tensorflow
-tensorflow-hub
-# tensorflow_hub still imports the deprecated `pkg_resources` API (setuptools>=81 removed it
-# outright, breaking the import with ModuleNotFoundError) — pin below 81 until upstream fixes
-# this. Confirmed necessary via direct repro on this environment (setuptools 84.0.0).
-setuptools<81
+tensorflow>=2.13.0
+tensorflow-hub>=0.14.0
+mediapipe>=1.0.0
