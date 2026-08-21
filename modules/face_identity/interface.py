@@ -21,6 +21,7 @@ over time — that temporal confirmation, if needed, is the calling pipeline's j
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from .config import FaceIdentityConfig, load_config
@@ -28,6 +29,9 @@ from .pipeline import FaceIdentityPipeline
 from .registry import FaceRegistry, RegistryEntry, sanitize_person_name
 
 __all__ = ["FaceIdentityResult", "FaceRegistry", "RegistryEntry", "sanitize_person_name", "evaluate", "configure"]
+
+_MATCH_COLOR = (0, 200, 0)
+_NO_MATCH_COLOR = (0, 0, 255)
 
 
 @dataclass
@@ -38,6 +42,23 @@ class FaceIdentityResult:
     matched_person_name: Optional[str]
     match_confidence: Optional[float]          # embedding similarity score, for debugging/calibration
     face_detection_confidence: Optional[float]
+
+    def draw_debug(self, frame: np.ndarray) -> None:
+        """
+        Draws the face bbox directly onto `frame` (full-frame coordinates, unlike the gesture
+        methods' draw_debug() which draw onto a person crop) — green + matched name/score if
+        `is_registered_match`, red + "no match" otherwise. Externally callable so any caller
+        (main.py, modules.followme_orchestrator, or this module's own visualize_face_identity.py)
+        gets the identical overlay without re-implementing it. No-ops if no face was found.
+        """
+        if not self.face_found or self.face_bbox is None:
+            return
+        x, y, w, h = self.face_bbox
+        color = _MATCH_COLOR if self.is_registered_match else _NO_MATCH_COLOR
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        label = (f"{self.matched_person_name} ({self.match_confidence:.2f})"
+                 if self.is_registered_match else f"no match ({self.match_confidence})")
+        cv2.putText(frame, label, (x, max(15, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
 
 _pipeline_singleton: Optional[FaceIdentityPipeline] = None

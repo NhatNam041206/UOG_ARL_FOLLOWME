@@ -92,10 +92,34 @@ wave_facing:
   # --- Confirmation state machine (spec §6) ---
   confirmation_duration_seconds: 1.0  # STARTING GUESS (spec range ~1.0-2.0s)
 
-# Camera configuration (optional) — used by main.py when --mode camera is selected.
-# Command-line --camera-index takes precedence over this setting.
+# Camera configuration — used by main.py when --mode camera is selected, and by
+# modules.followme_orchestrator's SteeringController (plans/08 §2/§3). Command-line
+# --camera-index takes precedence over camera_index below.
 camera:
-  camera_index: 2  # OS camera device index (0 = first/default camera, usually built-in webcam)
+  camera_index: 2      # OS camera device index (0 = first/default camera, usually built-in webcam)
+  # fov_degrees is a fixed PHYSICAL property of the lens (not empirically tuned like other
+  # thresholds in this file), but must still be set correctly from the actual hardware's spec,
+  # not guessed — marked 🟢 (working-default-once-filled) rather than 🔴/🟡 for that reason. Gates
+  # modules.followme_orchestrator.SteeringController: without it, horizontal_offset can never be
+  # converted to a real steering angle (fail-closed, should_move forced False while tracking).
+  fov_degrees: 85.0    # this project's camera hardware datasheet value
+  lens_type: "hybrid"  # informational only — never consumed by any calculation
+  focus_type: "fixed"  # informational only — same rationale as lens_type. Because this camera's
+                        # focus is FIXED (not variable-zoom), fov_degrees is safe to treat as one
+                        # constant; a variable-focus/zoom lens would need fov_degrees to become a
+                        # function of zoom level instead — not this project's situation.
+
+# PID steering gains (plans/08 §3/§4) — modules.followme_orchestrator.SteeringController converts
+# target_tracking's normalized horizontal_offset into a real angle (via camera.fov_degrees above)
+# then runs PID on it. All 4 keys are REQUIRED empirical/hardware values that cannot be guessed —
+# while any is null, SteeringController.is_calibrated() is False and the orchestrator forces
+# should_move=False even while a target is genuinely still being tracked (same fail-closed
+# convention as every other module in this project).
+steering:
+  kp: null                          # TODO: calibrate empirically against real Ackermann hardware
+  ki: null                          # TODO: calibrate empirically
+  kd: null                          # TODO: calibrate empirically
+  max_steering_angle_degrees: null  # TODO: set from the servo/Ackermann hardware's own datasheet limit — not a tuning target
 
 # Human detection (optional) — feeds per-person bboxes to modules.wave_facing_gate (one
 # is_waving/is_facing_camera evaluation per detected person). Not calibration-gated like
@@ -194,3 +218,40 @@ gesture_trajectory_verifier:
   # Reference-set "not ready" floor (spec §4.3, confirmed with the user: 0 or 1 references both
   # count as not-ready) is a fixed structural rule (MIN_REFERENCE_COUNT=2 in config.py), not a
   # per-project calibration value — not a key here by design.
+
+# Appearance Verifier — OSNet Re-ID (plans/05_appearance_verifier.md). Answers "does this crop
+# look like the same person as this reference set" — consumed by modules.target_tracking
+# (periodic re-verify sanity check) and modules.target_recovery (fallback re-acquisition), each
+# with their OWN separate threshold key, not this one (see those modules' sections below).
+# similarity_threshold is ESPECIALLY uncalibrated — two documented accuracy risks (similar-
+# clothing confusion, cross-domain generalization drop from OSNet's Market1501 training data to
+# this project's own campus footage) make a "starting guess" here less trustworthy than usual —
+# see docs/parameters.md and docs/modules.md for both risks in full. Fail-closed as usual: while
+# null, verify() reports match_found=False on every call.
+appearance_verifier:
+  similarity_threshold: null   # TODO: calibrate — especially uncalibrated, see note above
+  # osnet_model_name: "osnet_x1_0"  # optional override — not calibration-gated, working default
+
+# Target Recording + Tracking (plans/06_target_tracking.md). Locks onto the person the gesture
+# trigger identified, records a short appearance reference set, then tracks them frame-to-frame
+# via this module's own isolated YOLO+ByteTrack instance, reporting horizontal deviation from
+# frame-center for downstream steering. Hands off to target_recovery on LOST. All keys below
+# require empirical calibration (STARTING GUESSES / uncalibrated, per this module's spec §6).
+target_tracking:
+  record_duration_seconds: null                    # TODO: calibrate — spec suggests ~1-2s to start
+  min_recording_crops: 3                            # STARTING GUESS — below this, RECORDING extends rather than transitioning with a fragile reference set (confirmed with the user)
+  appearance_reverify_interval_seconds: null        # TODO: calibrate — how often the periodic ID-switch sanity check runs
+  appearance_reverify_similarity_threshold: null    # TODO: calibrate — deliberately its OWN key, independent from appearance_verifier.similarity_threshold (see that module's §4)
+  appearance_reverify_consecutive_failures: 2       # STARTING GUESS — confirmed with the user: 2 consecutive failed re-verifies before declaring LOST, not 1 (avoids a single bad-lighting frame triggering a full recovery cycle)
+  track_loss_grace_period_seconds: null             # TODO: calibrate — how long the locked track_id may be missing from ByteTrack's output before declaring LOST
+  # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance per isolation rule
+
+# Target Recovery / Search (plans/07_target_recovery.md). Takes over when target_tracking reports
+# LOST — searches the full frame via face-based re-acquisition first (Path A, primary), falling
+# back to appearance-based matching (Path B) only after face_search_grace_attempts consecutive
+# Path-A failures. All keys require empirical calibration.
+target_recovery:
+  face_search_grace_attempts: null       # TODO: calibrate — a COUNT of consecutive Path-A-failure frames, NOT a time duration (see this module's spec §4.2 for why)
+  appearance_fallback_threshold: null    # TODO: calibrate — deliberately its OWN key, independent from appearance_verifier.similarity_threshold and target_tracking.appearance_reverify_similarity_threshold
+  search_timeout_seconds: null           # TODO: calibrate — spec suggests ~1-2 minutes as a starting range
+  # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance for Path B's whole-frame detection

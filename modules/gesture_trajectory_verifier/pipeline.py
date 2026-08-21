@@ -34,6 +34,7 @@ class PipelineResult(NamedTuple):
     arm: Optional[str]
     reference_count: int
     keypoints_raw: Optional[object]
+    keypoints_decoded: Optional[object]  # list of Keypoint, crop-pixel space — for draw_debug()
 
 
 @dataclass
@@ -134,6 +135,7 @@ class GestureTrajectoryVerifierPipeline:
             track_id=track_id, is_waving=(waving_state == GREEN), waving_state=waving_state,
             confidence_debug=score, matched_reference_id=ref_id, arm=arm,
             reference_count=len(reference_entries), keypoints_raw=raw_keypoints,
+            keypoints_decoded=keypoints,
         )
 
     def _no_signal_result(self, track_id: int, state: _TrackState, timestamp: float) -> PipelineResult:
@@ -141,5 +143,5 @@ class GestureTrajectoryVerifierPipeline:
         return PipelineResult(
             track_id=track_id, is_waving=False, waving_state=waving_state,
             confidence_debug=None, matched_reference_id=None, arm=None,
-            reference_count=0, keypoints_raw=None,
+            reference_count=0, keypoints_raw=None, keypoints_decoded=None,
         )

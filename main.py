@@ -8,16 +8,27 @@ module selection/wiring lives here in the root entry point, not inside any modul
     wave_facing  Human detection -> per-person Wave Gesture + Facing-Camera Gate (the ORIGINAL
                  demo pipeline, whole-frame human detection, no identity verification).
     both         Both of the above, independently, on the SAME frame each iteration.
-    face_first   The face-first exploratory pipeline from plans/01-04: face detect+match
-                 (modules.face_identity) -> ROI-scoped human detection (modules.human_detection_roi)
-                 -> ONE of three interchangeable gesture methods (--gesture-method), per matched
-                 person. TRIGGER = registered_person (implied True, a face already matched) AND
-                 is_waving from the chosen gesture method. This is the pipeline plans/01-04 describe.
+    pretrigger   The face-first exploratory pipeline from plans/01-04, STOPPING at the trigger:
+                 face detect+match (modules.face_identity) -> ROI-scoped human detection
+                 (modules.human_detection_roi) -> ONE of three interchangeable gesture methods
+                 (--gesture-method), per matched person. TRIGGER = registered_person (implied
+                 True, a face already matched) AND is_waving from the chosen gesture method.
+                 Renamed from the original "face_first" (plans/01-04 still call it that) once
+                 "followme" below started continuing PAST this same trigger point — this mode
+                 exists for calibrating/testing just the pre-trigger stages in isolation, same
+                 as it always did.
+    followme     The FULL pipeline (plans/01-08): everything "pretrigger" does, but continuing
+                 past the trigger into modules.followme_orchestrator — target_tracking (record +
+                 follow), target_recovery (re-acquire on loss), and PID steering. Composes
+                 modules.followme_orchestrator.interface (configure()/step()) rather than
+                 re-implementing that sequencing here — see docs/architecture.md's isolation
+                 exception note for why that module, not this file, owns the composition.
 
 Bbox color for wave_facing/both (only drawn with --show): GREEN once both is_waving and
 is_facing_camera are GREEN (confirmed), YELLOW while either signal is still building, RED
-otherwise. For face_first: GREEN means TRIGGER=True, YELLOW means confirmation is building, RED
-otherwise.
+otherwise. For pretrigger: GREEN means TRIGGER=True, YELLOW means confirmation is building, RED
+otherwise. For followme: GREEN/YELLOW/RED reflect FollowMeCommand.debug_state (see
+modules/followme_orchestrator/visualize_followme_orchestrator.py's own color table).
 
 Standalone single-module test/visualization scripts (all support --show, some chain live with
 their own upstream modules where the module's own spec calls for it — see each script's
@@ -26,14 +37,20 @@ modules/wave_facing_gate/test_wave_facing.py, modules/face_identity/{test_face_i
 visualize_face_identity}.py, modules/human_detection_roi/{test_human_detection_roi,
 visualize_human_detection_roi}.py, modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,
 visualize_gesture_hand_keypoint}.py, modules/gesture_trajectory_verifier/
-{test_gesture_trajectory_verifier,visualize_gesture_trajectory_verifier}.py. This file (main.py)
-is the general runner that combines modules for actual multi-module/multi-person operation.
+{test_gesture_trajectory_verifier,visualize_gesture_trajectory_verifier}.py,
+modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py,
+modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py,
+modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py,
+modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py.
+This file (main.py) is the general runner that combines modules for actual multi-module/
+multi-person operation.
 
 Usage:
     python main.py --mode camera --modules estop
     python main.py --mode camera --modules wave_facing --show --debug
-    python main.py --mode camera --modules face_first --gesture-method hand_keypoint --show
-    python main.py --mode video --video path.mp4 --modules face_first --gesture-method trajectory_verifier --show
+    python main.py --mode camera --modules pretrigger --gesture-method hand_keypoint --show
+    python main.py --mode camera --modules followme --gesture-method hand_keypoint --show
+    python main.py --mode video --video path.mp4 --modules followme --gesture-method trajectory_verifier --show
 """
 import argparse
 import os
@@ -99,7 +116,7 @@ class _GestureMethodAdapter:
     Method 1, predates the plans' shared GestureMethodResult contract, has its own two-signal
     is_waving/is_facing_camera output) and modules.gesture_hand_keypoint / .gesture_trajectory_verifier
     ("hand_keypoint" / "trajectory_verifier" — Methods 2/3, share the plans' GestureMethodResult
-    contract exactly). Lets run_face_first_pipeline() call any of the three the same way.
+    contract exactly). Lets run_pretrigger_pipeline() call any of the three the same way.
     """
 
     def __init__(self, method_name: str):
@@ -139,8 +156,8 @@ class _GestureMethodAdapter:
     def draw_debug(self, crop, person_bbox_full_frame=None) -> None:
         """Draws the last evaluate() call's per-method debug overlay directly onto `crop` (a view
         into the caller's frame) — same overlay each method's own standalone visualize_*.py
-        script draws. No-ops if the method has no draw_debug (gesture_trajectory_verifier
-        doesn't define one yet) or nothing has been evaluated this track yet."""
+        script draws. All three methods now define draw_debug(); this no-ops only if nothing has
+        been evaluated for this track yet."""
         if self._last_result is None or not hasattr(self._last_result, "draw_debug"):
             return
         if self.method_name == "hand_keypoint":
@@ -173,7 +190,7 @@ def run_legacy_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
                 break
 
             frame_h, frame_w = frame.shape[:2]
-            line = f"frame={frame_idx:06d}"
+            line = f"mode={args.modules.upper()} frame={frame_idx:06d}"
             overlay_y = 30
 
             if estop is not None:
@@ -240,21 +257,21 @@ def run_legacy_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
     return 0
 
 
-def run_face_first_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
+def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
     """
-    --modules face_first — the exploratory pipeline from plans/01-04:
+    --modules pretrigger — the exploratory pipeline from plans/01-04, stopping at the trigger:
         full frame -> face detect+match -> ROI-scoped human detection -> chosen gesture method
     TRIGGER = registered_person (a face already matched a registry entry) AND is_waving from the
     chosen gesture method. Multiple registered people in the same frame are all evaluated
     independently (face_identity.evaluate() already returns a list, spec §1: it does not pick
-    "the" person).
+    "the" person). For the FULL pipeline that continues past this trigger, see
+    run_followme_pipeline() below.
     """
     from modules.face_identity.interface import FaceRegistry, evaluate as evaluate_face
     from modules.human_detection_roi.interface import evaluate as evaluate_person
 
     face_registry = FaceRegistry(args.face_registry_dir)
     gesture = _GestureMethodAdapter(args.gesture_method)
-    active_track_ids = set()
 
     frame_idx = 0
     try:
@@ -266,11 +283,19 @@ def run_face_first_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
             frame_h, frame_w = frame.shape[:2]
 
             face_results = [r for r in evaluate_face(frame, face_registry) if r.is_registered_match]
-            line = f"frame={frame_idx:06d} faces_matched={len(face_results)}"
-            seen_track_ids = set()
+            line = f"mode=PRETRIGGER frame={frame_idx:06d} faces_matched={len(face_results)}"
 
             for face in face_results:
                 person = evaluate_person(frame, face.face_bbox)
+
+                if args.show and args.debug:
+                    # Phase 1/2 overlay: face bbox + ROI region + person bbox, drawn even when
+                    # person_found is False (the ROI itself is still useful to see) — the exact
+                    # overlay modules/face_identity's and modules/human_detection_roi's own
+                    # visualize_*.py scripts draw, reused here rather than re-implemented.
+                    face.draw_debug(frame)
+                    person.draw_debug(frame, face.face_bbox)
+
                 if not person.person_found:
                     line += f" | {face.matched_person_name}: person_not_found"
                     continue
@@ -289,7 +314,6 @@ def run_face_first_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
                 # registered person's name instead — stable across frames on its own, since the
                 # same name only ever maps to one physical person.
                 track_id = abs(hash(face.matched_person_name)) % 100000
-                seen_track_ids.add(track_id)
                 is_waving, waving_state, extra = gesture.evaluate(
                     track_id, crop, timestamp, person_bbox_full_frame=(px, py, pw, ph),
                 )
@@ -302,6 +326,8 @@ def run_face_first_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
 
                 if args.show:
                     if args.debug:
+                        # Phase 3 overlay: gesture method's own keypoints/skeleton/state, drawn
+                        # on top of phase 1/2's overlay above.
                         gesture.draw_debug(crop, person_bbox_full_frame=(px, py, pw, ph))
                     color = _WAVE_STATE_COLOR["GREEN"] if trigger else (
                         _WAVE_STATE_COLOR["YELLOW"] if waving_state == "YELLOW" else _WAVE_STATE_COLOR["RED"]
@@ -310,17 +336,103 @@ def run_face_first_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
                     label = f"{face.matched_person_name}: {waving_state}" + ("  TRIGGER!" if trigger else "")
                     cv2.putText(frame, label, (px, max(15, py - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-            # Release gesture-method state for tracks that dropped out this frame (face no
-            # longer matched/found) — bounds memory, mirrors each method's own reset_track/
-            # release_track hygiene hook.
-            for stale_id in active_track_ids - seen_track_ids:
-                gesture.release_track(stale_id)
-            active_track_ids = seen_track_ids
-
+            # No per-frame release_track() here (deliberately removed, not just relaxed): a
+            # person briefly not matched/found (occlusion, one missed detection) is NOT the
+            # same as "gone for good," and every gesture method's own per-track state is already
+            # self-healing against real elapsed wall-clock time without any help from this loop
+            # — Method 2's SequenceStateMachine resets itself via max_transition_gap_seconds the
+            # next time evaluate() runs after a gap, Method 1's motion buffers and Method 3's
+            # trajectory buffers both trim samples older than their own window on every call.
+            # Eagerly releasing on the first missed frame was wiping that state out from under
+            # those checks before they ever got to run — a bug, not the "hygiene" it looked like.
+            # track_id itself is bounded by the face registry's size (one entry per REGISTERED
+            # person, never per stranger), so leaving a track's state allocated indefinitely
+            # isn't a real memory concern at this project's scale.
             print(line)
 
             if args.show:
-                cv2.imshow("main (face-first pipeline)", frame)
+                cv2.imshow("main (pretrigger pipeline)", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            frame_idx += 1
+    finally:
+        cap.release()
+        if args.show:
+            cv2.destroyAllWindows()
+
+    print(f"Processed {frame_idx} frames from {source_desc}.")
+    return 0
+
+
+_FOLLOWME_STATE_COLOR = {
+    "WAITING_FOR_TRIGGER": (180, 180, 180),
+    "TRACKING_STARTED": (0, 220, 255),
+    "RECORDING": (0, 220, 255),
+    "TRACKING": (0, 200, 0),
+    "RECORDING_STEERING_UNCALIBRATED": (0, 160, 255),
+    "TRACKING_STEERING_UNCALIBRATED": (0, 160, 255),
+    "RECOVERING": (0, 140, 255),
+    "REACQUIRED_RESUMING": (0, 200, 0),
+    "STOPPED": (0, 0, 255),
+}
+
+
+def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
+    """
+    --modules followme — the FULL pipeline (plans/01-08): everything run_pretrigger_pipeline()
+    above does, continuing PAST the trigger into modules.followme_orchestrator — target_tracking
+    (record + follow), target_recovery (re-acquire on loss), and PID steering.
+
+    Composes modules.followme_orchestrator.interface (configure() once, then step() per frame)
+    rather than re-implementing that sequencing here — that module is the one deliberate,
+    documented exception to "only main.py composes across module boundaries"
+    (docs/architecture.md design rule #2), built specifically to be this reusable, importable
+    version of the pipeline. This function is a thin CLI wrapper around it, mirroring exactly
+    what modules/followme_orchestrator/visualize_followme_orchestrator.py already does
+    standalone, just reusing main.py's own --mode/--camera-index/--video plumbing instead of
+    duplicating that argument handling a second time.
+
+    No special TIMEOUT handling needed here — modules.followme_orchestrator already auto-resumes
+    watching for a fresh trigger once a search episode times out (confirmed with the user): the
+    very next step() call in this same per-frame loop does that on its own.
+
+    --debug draws EVERY phase's overlay (face, ROI, gesture, tracking, recovery) via
+    modules.followme_orchestrator.interface.draw_debug() — that function composes each composed
+    module's OWN draw_debug(), so this file draws none of it itself.
+    """
+    from modules.followme_orchestrator.interface import configure, draw_debug, step
+
+    configure(args.gesture_method, thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
+
+    frame_idx = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            timestamp = time.time()
+
+            command = step(frame, timestamp)
+            color = _FOLLOWME_STATE_COLOR.get(command.debug_state, (255, 255, 255))
+            angle_str = f"{command.steering_angle_degrees:+.1f}" if command.steering_angle_degrees is not None else "None"
+            line = (
+                f"mode=FOLLOWME frame={frame_idx:06d} debug_state={command.debug_state:28s} "
+                f"should_move={command.should_move} steering_angle_degrees={angle_str}"
+            )
+            print(line)
+
+            if args.show:
+                if args.debug:
+                    # Phase overlays (face/ROI/gesture/tracking/recovery), drawn first so the
+                    # summary text below isn't occluded by it — same layering convention as
+                    # run_pretrigger_pipeline and run_legacy_pipeline.
+                    draw_debug(frame)
+                draw_lines(frame, [
+                    f"state={command.debug_state}",
+                    f"should_move={command.should_move}  steering={angle_str}deg",
+                ], 30, color)
+                cv2.imshow("main (followme pipeline)", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
@@ -350,43 +462,63 @@ def main() -> int:
         help=f"OS camera device index (default {config_camera_index} from config, or 0 if not set). Used when --mode camera.",
     )
     parser.add_argument(
-        "--modules", choices=["estop", "wave_facing", "both", "face_first"], default="estop",
+        "--modules", choices=["estop", "wave_facing", "both", "pretrigger", "followme"], default="estop",
         help="Which pipeline to run: 'estop'/'wave_facing'/'both' are the original whole-frame "
-             "demo pipeline; 'face_first' is the face-first exploratory pipeline from "
-             "plans/01-04 (requires --gesture-method). Default: estop.",
+             "demo pipeline; 'pretrigger' is the face-first exploratory pipeline from "
+             "plans/01-04, stopping at TRIGGER (requires --gesture-method); 'followme' is the "
+             "FULL pipeline (plans/01-08) continuing past the trigger into tracking/recovery/"
+             "steering via modules.followme_orchestrator (also requires --gesture-method). "
+             "Default: estop.",
     )
     parser.add_argument(
         "--gesture-method", choices=["condition", "hand_keypoint", "trajectory_verifier"],
-        help="Which gesture method the face_first pipeline uses: 'condition' = Method 1 "
+        help="Which gesture method 'pretrigger'/'followme' use: 'condition' = Method 1 "
              "(modules.wave_facing_gate), 'hand_keypoint' = Method 2, 'trajectory_verifier' = "
-             "Method 3. Required when --modules face_first.",
+             "Method 3. Required when --modules pretrigger or followme.",
     )
     parser.add_argument(
         "--face-registry-dir", default="modules/face_identity/registry_data",
-        help="Path to the face_identity registry directory. Used when --modules face_first.",
+        help="Path to the face_identity registry directory. Used when --modules pretrigger or followme.",
+    )
+    parser.add_argument(
+        "--config", default="config/thresholds.yaml",
+        help="Path to thresholds.yaml. Used when --modules followme (passed through to "
+             "modules.followme_orchestrator.configure()).",
     )
     parser.add_argument(
         "--debug", action="store_true",
-        help="Enable per-person debug overlay (keypoints/skeleton/gate state), drawn by whichever "
-             "module is active: wave_facing's own pose debug for --modules wave_facing/both, or the "
-             "chosen --gesture-method's draw_debug() for --modules face_first (no-op for "
-             "trajectory_verifier, which doesn't define one).",
+        help="Enable the full per-phase debug overlay: wave_facing's own pose debug for "
+             "--modules wave_facing/both; face bbox + ROI region + the chosen --gesture-method's "
+             "keypoints/skeleton/state for --modules pretrigger; all of that PLUS "
+             "target_tracking's bbox/center-line/reverify readout and target_recovery's search "
+             "status for --modules followme (via modules.followme_orchestrator.draw_debug(), "
+             "which composes each module's own draw_debug() — see docs/architecture.md).",
     )
     parser.add_argument("--show", action="store_true", help="Display frames in a window while processing.")
     args = parser.parse_args()
 
     if args.mode == "video" and not args.video:
         parser.error("--video is required when --mode video")
-    if args.modules == "face_first" and not args.gesture_method:
-        parser.error("--gesture-method is required when --modules face_first")
+    if args.modules in ("pretrigger", "followme") and not args.gesture_method:
+        parser.error(f"--gesture-method is required when --modules {args.modules}")
 
     cap, source_desc = open_capture(args)
     if not cap.isOpened():
         print(f"ERROR: could not open {source_desc}", file=sys.stderr)
         return 1
 
-    if args.modules == "face_first":
-        return run_face_first_pipeline(cap, args, source_desc)
+    # "Initial" stage: one-time banner identifying which mode is about to run and its key
+    # settings, before any per-frame logging starts — so a terminal log is never ambiguous about
+    # which pipeline produced the lines that follow it.
+    print(
+        f"mode={args.modules.upper()} source={source_desc} "
+        f"gesture_method={args.gesture_method} show={args.show} debug={args.debug}"
+    )
+
+    if args.modules == "pretrigger":
+        return run_pretrigger_pipeline(cap, args, source_desc)
+    if args.modules == "followme":
+        return run_followme_pipeline(cap, args, source_desc)
     return run_legacy_pipeline(cap, args, source_desc)
 
 

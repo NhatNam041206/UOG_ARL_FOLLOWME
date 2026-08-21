@@ -20,9 +20,6 @@ import cv2
 
 from modules.face_identity.interface import FaceRegistry, evaluate
 
-_MATCH_COLOR = (0, 200, 0)
-_NO_MATCH_COLOR = (0, 0, 255)
-
 
 def open_capture(args: argparse.Namespace):
     if args.mode == "camera":
@@ -67,12 +64,7 @@ def main() -> int:
                     f"is_registered_match={r.is_registered_match} "
                     f"matched_person_name={r.matched_person_name} match_confidence={r.match_confidence}"
                 )
-                x, y, w, h = r.face_bbox
-                color = _MATCH_COLOR if r.is_registered_match else _NO_MATCH_COLOR
-                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                label = (f"{r.matched_person_name} ({r.match_confidence:.2f})"
-                         if r.is_registered_match else f"no match ({r.match_confidence})")
-                cv2.putText(frame, label, (x, max(15, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                r.draw_debug(frame)
 
             cv2.putText(frame, f"faces: {len(results)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.imshow("visualize_face_identity", frame)

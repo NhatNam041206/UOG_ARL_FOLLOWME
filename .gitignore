@@ -16,6 +16,7 @@ Thumbs.db
 /yolo11n.onnx
 modules/*/models/*.onnx
 modules/*/models/*.task
+modules/*/models/*.pth
 
 # Personal biometric data — captured face photos and their embeddings. Kept out of git by
 # default since these identify a real person; remove these lines if you actually want them

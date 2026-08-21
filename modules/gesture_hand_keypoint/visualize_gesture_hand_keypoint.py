@@ -5,6 +5,13 @@ repo, so live-chaining the full upstream pipeline is the more useful default) �
 their public evaluate()/dataclass outputs, per each module's own isolation rule. Passes
 person.person_bbox through as person_bbox_full_frame, required for the palm-height gate.
 
+This chained sequence — face_identity -> human_detection_roi -> gesture_hand_keypoint -- IS the
+same pre-TRIGGER flow main.py's face_first pipeline and modules.followme_orchestrator both run
+(see docs/architecture.md's face_first pipeline diagram); this tool exists to watch it live while
+calibrating, not to replace either of those. TRIGGER is computed and displayed explicitly below
+using the SAME definition main.py uses: TRIGGER = is_waving (registered_person is already implied
+True by the is_registered_match filter below — a face never reaches this loop otherwise).
+
 Draws, per frame, per person crop:
   - All 21 MediaPipe hand landmarks + skeleton on each detected hand — the skeleton/keypoints
     are colored YELLOW when that hand currently classifies as OPEN, GREEN when CLOSED, gray if
@@ -16,8 +23,9 @@ Draws, per frame, per person crop:
   - The current OPEN->CLOSED->OPEN->CLOSED sequence stage (WAITING_OPEN / WAITING_CLOSE_1 /
     WAITING_OPEN_2 / WAITING_CLOSE_2 / CONFIRMED) — needed to debug the sequence itself, not
     just the debounced red/yellow/green result
-  - A bbox-colored (red/yellow/green) indicator reflecting the current confirmation state
-Logs GestureMethodResult fields to console per frame.
+  - A bbox-colored (red/yellow/green) indicator reflecting the current confirmation state, with
+    "TRIGGER!" appended to the label once TRIGGER = is_waving actually goes True
+Logs GestureMethodResult fields, plus the computed TRIGGER flag, to console per frame.
 
 Usage:
     python -m modules.gesture_hand_keypoint.visualize_gesture_hand_keypoint --mode camera [--camera-index 0]
@@ -86,6 +94,10 @@ def main() -> int:
 
                 track_id = abs(hash(face.matched_person_name)) % 100000  # stand-in track_id for this debug tool
                 gesture = evaluate_gesture(track_id, crop, timestamp, person_bbox_full_frame=person.person_bbox)
+                # Same definition main.py's face_first pipeline uses: TRIGGER = is_waving —
+                # registered_person is already implied True (this face already passed the
+                # is_registered_match filter above), same as main.py's own comment on this line.
+                trigger = gesture.is_waving
                 color = _STATE_COLOR.get(gesture.waving_state, (255, 255, 255))
 
                 # Draws skeleton + keypoints (yellow=OPEN/green=CLOSED/gray=NEITHER) + per-finger
@@ -95,7 +107,8 @@ def main() -> int:
                 gesture.draw_debug(crop, person_bbox_full_frame=person.person_bbox)
 
                 cv2.rectangle(frame, (px, py), (px + pw, py + ph), color, 2)
-                label1 = f"{face.matched_person_name}: state={gesture.waving_state} stage={gesture.sequence_stage}"
+                label1 = (f"{face.matched_person_name}: state={gesture.waving_state} stage={gesture.sequence_stage}"
+                          + ("  TRIGGER!" if trigger else ""))
                 label2 = f"conf={gesture.confidence_debug} palm_facing={gesture.palm_facing_camera_debug}"
                 cv2.putText(frame, label1, (px, max(15, py - 24)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                 cv2.putText(frame, label2, (px, max(15, py - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
@@ -104,7 +117,8 @@ def main() -> int:
                     f"frame={frame_idx:06d} track_id={track_id} is_waving={gesture.is_waving} "
                     f"waving_state={gesture.waving_state} sequence_stage={gesture.sequence_stage} "
                     f"confidence_debug={gesture.confidence_debug} "
-                    f"palm_facing_camera_debug={gesture.palm_facing_camera_debug}"
+                    f"palm_facing_camera_debug={gesture.palm_facing_camera_debug} "
+                    f"TRIGGER={trigger}"
                 )
 
             cv2.imshow("visualize_gesture_hand_keypoint", frame)
