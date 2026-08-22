@@ -257,13 +257,14 @@ target_recovery:
   # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance for Path B's whole-frame detection
 
 # Vendored tracking+recovery backbone (modules/autocar — vinhh9608-byte/Autocar, commit 27ee33a),
-# slated to replace target_tracking + target_recovery above once wired in and confirmed working
-# (see modules/autocar/README.md and the project's own integration plan — module stays named
-# "autocar" until that happens, then this section renames to target_tracking too). Their engine
-# (detector/, tracker/, identity/, config.py) is kept UNMODIFIED per that decision; every value
-# below is only ever read by the NEW adapter code we write in modules/autocar/interface.py +
-# pipeline.py (not yet built) and passed into their classes' own constructor overrides — their
-# vendored config.py is never edited.
+# slated to replace target_tracking + target_recovery above once confirmed working (module stays
+# named "autocar" until then, renaming to target_tracking afterward). Their engine (detector/,
+# tracker/, identity/, config.py) is kept UNMODIFIED — modules/autocar/ has nothing added to it
+# either; every value below is only ever read by the adapter code in
+# modules/followme_orchestrator/autocar_adapter.py (+ autocar_bootstrap.py), which lives outside
+# modules/autocar/ specifically so that directory stays a pure, untouched mirror of the clone,
+# and passes these into their classes' own constructor overrides — their vendored config.py is
+# never edited.
 #
 # Detector/tracker/re-id values are carried over as-is from their own config.py — those are
 # their own considered starting points, not values we invented, so treated as STARTING GUESSES
@@ -288,7 +289,7 @@ autocar:
 
   # --- Re-ID / TargetLock (their identity/target_lock.py) ---
   reid_similarity_threshold: 0.75        # STARTING GUESS, carried from their config.py REID_SIMILARITY_THRESHOLD — ESPECIALLY uncalibrated, same OSNet accuracy caveats as appearance_verifier above
-  reid_face_min_keypoint_conf: 0.5       # STARTING GUESS, carried from their config.py REID_FACE_MIN_KEYPOINT_CONF
+  reid_face_min_keypoint_conf: 0.8       # STARTING GUESS, carried from their config.py REID_FACE_MIN_KEYPOINT_CONF
   reid_head_split_fallback_fraction: 0.35  # STARTING GUESS, carried from their config.py REID_HEAD_SPLIT_FALLBACK_FRACTION
   reid_acquire_rounds: 3                 # STARTING GUESS, carried from their config.py REID_ACQUIRE_ROUNDS — only used on initial force-lock IoU fallback, not the normal trigger path
   reid_acquire_cooldown_sec: 0.5         # STARTING GUESS, carried from their config.py REID_ACQUIRE_COOLDOWN_SEC
@@ -296,3 +297,17 @@ autocar:
 
   # --- Ours, not theirs (closes the "search forever" gap noted above) ---
   recovery_timeout_seconds: null  # TODO: calibrate — spec-equivalent to target_recovery.search_timeout_seconds above
+
+# register_person.py's capture ROI — a bounding box (fraction of frame width/height, same
+# [x1,y1,x2,y2] convention as emergency_stop's runway lines / autocar's own ENROLL_ROI_PERCENT)
+# that a detection must fall inside to be accepted as a capture sample. Exists so that if someone
+# else walks through the background (or stands next to the subject) during registration, their
+# face/body doesn't get captured into the subject's profile by mistake — the operator points the
+# camera so the intended subject stands inside this box, everyone else outside it is ignored.
+# Two separate keys because the FRONT and BACK phases use different detectors (face vs. person)
+# and the subject may naturally stand slightly differently in each. STARTING GUESS defaults
+# (centered, most of the frame height) — not hardware-calibrated, just a reasonable box to start
+# from; adjust to match your actual camera framing.
+register_person:
+  front_roi_percent: [0.20, 0.05, 0.80, 0.95]  # STARTING GUESS — checked against the detected face bbox's center
+  back_roi_percent: [0.15, 0.0, 0.85, 1.0]     # STARTING GUESS — checked against the detected person bbox's center (wider: a turned-around body silhouette varies more than a face)

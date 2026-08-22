@@ -19,6 +19,18 @@ module selection/wiring lives here in the root entry point, not inside any modul
                  modules.followme_orchestrator.interface (configure()/step()) rather than
                  re-implementing that sequencing here — see docs/architecture.md's isolation
                  exception note for why that module, not this file, owns the composition.
+    register     Not a per-frame pipeline — hands off to register_person instead (see that file).
+                 With --person-name: headless, registers just that one person (front-facing,
+                 then turned around) and exits — builds BOTH the face_identity registry entry
+                 and the autocar re-id enrollment profile. Without --person-name: opens
+                 register_person.RegistrationApp, a Tkinter CRUD UI listing everyone
+                 registered/in-progress, to register a new person OR pick/re-capture/delete an
+                 existing one interactively. Ignores --mode/--show/--debug entirely
+                 (--gesture-method only required to actually start following someone afterward).
+                 Add --then-followme (headless path) to chain straight into camera followme mode
+                 once registration succeeds; from the UI, select a fully-registered person and
+                 click "Follow Me" to do the same thing interactively. Either way, one main.py
+                 invocation covers register -> followme end to end, instead of two separate runs.
 
 Bbox color for pretrigger (only drawn with --show): GREEN means TRIGGER=True, YELLOW means
 confirmation is building, RED otherwise. For followme: GREEN/YELLOW/RED reflect
@@ -41,9 +53,16 @@ This file (main.py) is the general runner that combines modules for actual multi
 multi-person operation.
 
 Usage:
+    python main.py
+        # ^ the simplest form — --modules defaults to "register", opening the Tkinter UI to
+        # register a new person or pick/re-capture/delete an existing one. Pass --gesture-method
+        # too if you want to use the UI's "Follow Me" button afterward (see below).
     python main.py --mode camera --modules pretrigger --gesture-method hand_keypoint --show
     python main.py --mode camera --modules followme --gesture-method hand_keypoint --show
     python main.py --mode video --video path.mp4 --modules followme --gesture-method trajectory_verifier --show
+    python main.py --modules register --person-name Nam --camera-index 0
+    python main.py --modules register --person-name Nam --then-followme --gesture-method hand_keypoint --show
+    python main.py --modules register --gesture-method hand_keypoint --show
 """
 import argparse
 import os
@@ -264,12 +283,9 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
 _FOLLOWME_STATE_COLOR = {
     "WAITING_FOR_TRIGGER": (180, 180, 180),
     "TRACKING_STARTED": (0, 220, 255),
-    "RECORDING": (0, 220, 255),
     "TRACKING": (0, 200, 0),
-    "RECORDING_STEERING_UNCALIBRATED": (0, 160, 255),
     "TRACKING_STEERING_UNCALIBRATED": (0, 160, 255),
     "RECOVERING": (0, 140, 255),
-    "REACQUIRED_RESUMING": (0, 200, 0),
     "STOPPED": (0, 0, 255),
 }
 
@@ -295,9 +311,11 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> in
 
     --debug draws EVERY phase's overlay (face, ROI, gesture, tracking, recovery) via
     modules.followme_orchestrator.interface.draw_debug() — that function composes each composed
-    module's OWN draw_debug(), so this file draws none of it itself.
+    module's OWN draw_debug(), so this file draws none of it itself. The steering-direction arrow
+    (draw_steering_arrow()) is drawn separately, whenever --show is on, independent of --debug —
+    it's the actual calculated robot command, not a per-phase debug readout.
     """
-    from modules.followme_orchestrator.interface import configure, draw_debug, step
+    from modules.followme_orchestrator.interface import configure, draw_debug, draw_steering_arrow, step
 
     configure(args.gesture_method, thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
 
@@ -328,6 +346,10 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> in
                     f"state={command.debug_state}",
                     f"should_move={command.should_move}  steering={angle_str}deg",
                 ], 30, color)
+                # The calculated direction to the person — drawn regardless of --debug (it's the
+                # actual robot command, not a per-phase debug readout); no-ops on its own when
+                # should_move is False, so it simply doesn't appear while stopped.
+                draw_steering_arrow(frame, command)
                 cv2.imshow("main (followme pipeline)", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
@@ -347,8 +369,9 @@ def main() -> int:
         description="Run project modules against a live camera or a recorded video."
     )
     parser.add_argument(
-        "--mode", choices=["camera", "video"], required=True,
-        help="Input source: 'camera' for a live webcam, 'video' for a recorded file.",
+        "--mode", choices=["camera", "video"],
+        help="Input source: 'camera' for a live webcam, 'video' for a recorded file. Required "
+             "for --modules pretrigger/followme; ignored (and not required) for --modules register.",
     )
     parser.add_argument("--video", help="Path to a recorded video file. Required when --mode video.")
 
@@ -358,11 +381,14 @@ def main() -> int:
         help=f"OS camera device index (default {config_camera_index} from config, or 0 if not set). Used when --mode camera.",
     )
     parser.add_argument(
-        "--modules", choices=["pretrigger", "followme"], required=True,
+        "--modules", choices=["pretrigger", "followme", "register"], default="register",
         help="Which pipeline to run: 'pretrigger' is the face-first exploratory pipeline from "
              "plans/01-04, stopping at TRIGGER (requires --gesture-method); 'followme' is the "
              "FULL pipeline (plans/01-08) continuing past the trigger into tracking/recovery/"
-             "steering via modules.followme_orchestrator (also requires --gesture-method).",
+             "steering via modules.followme_orchestrator (also requires --gesture-method); "
+             "'register' (the default — the natural starting point, register-or-choose then "
+             "follow) hands off to register_person instead of a per-frame pipeline (see that "
+             "file, and --person-name above).",
     )
     parser.add_argument(
         "--gesture-method", choices=["condition", "hand_keypoint", "trajectory_verifier"],
@@ -377,7 +403,29 @@ def main() -> int:
     parser.add_argument(
         "--config", default="config/thresholds.yaml",
         help="Path to thresholds.yaml. Used when --modules followme (passed through to "
-             "modules.followme_orchestrator.configure()).",
+             "modules.followme_orchestrator.configure()) or --modules register.",
+    )
+    parser.add_argument(
+        "--person-name",
+        help="--modules register only: register just this one person headlessly, no UI. Omit "
+             "entirely to open the Tkinter registration UI instead (list/register/re-capture/"
+             "delete people interactively).",
+    )
+    parser.add_argument(
+        "--front-samples", type=int, default=15,
+        help="--modules register only: how many face-forward samples to capture.",
+    )
+    parser.add_argument(
+        "--back-samples", type=int, default=15,
+        help="--modules register only: how many turned-around samples to capture.",
+    )
+    parser.add_argument(
+        "--then-followme", action="store_true",
+        help="--modules register --person-name (headless path) only: on successful registration, "
+             "immediately continue into camera followme mode (as if --mode camera --modules "
+             "followme had been run right after). Requires --gesture-method. Skipped entirely if "
+             "registration itself fails. The UI path (no --person-name) does this interactively "
+             "instead, via its own \"Follow Me\" button.",
     )
     parser.add_argument(
         "--debug", action="store_true",
@@ -391,6 +439,48 @@ def main() -> int:
     parser.add_argument("--show", action="store_true", help="Display frames in a window while processing.")
     args = parser.parse_args()
 
+    if args.modules == "register":
+        import register_person
+
+        if args.person_name:
+            # Headless path — register exactly this one person, no GUI.
+            if args.then_followme and not args.gesture_method:
+                parser.error("--gesture-method is required when --then-followme is set")
+
+            result = register_person.run(
+                args.person_name, args.camera_index, args.front_samples, args.back_samples, args.config,
+            )
+            if result != 0 or not args.then_followme:
+                return result
+            chosen_name = args.person_name
+            print(f"\nRegistration succeeded — continuing into followme mode for '{chosen_name}'.")
+
+        else:
+            # No --person-name — open the Tkinter CRUD app instead: register a new person or
+            # manage/re-capture/delete existing ones, then optionally click "Follow Me" on a
+            # fully-registered person to hand off into the SAME followme loop below. Blocks here
+            # until the app window closes; app.chosen_name is None unless "Follow Me" was used.
+            app = register_person.RegistrationApp(
+                args.camera_index, args.front_samples, args.back_samples, args.config,
+                can_follow_me=bool(args.gesture_method),
+            )
+            app.mainloop()
+            if not app.chosen_name:
+                return 0  # operator managed data and closed the window — nothing more to do
+            chosen_name = app.chosen_name
+            print(f"\n'{chosen_name}' selected — continuing into followme mode.")
+
+        # Fall through into the SAME followme camera loop below (args.mode/args.modules
+        # rewritten so the existing dispatch code just below handles it identically to a fresh
+        # `--mode camera --modules followme` run; the camera was already released before
+        # returning here, either by register_person.run() or by closing the app, so reopening it
+        # is safe). followme itself takes no person_name — whoever waves and matches the face
+        # registry triggers it, same as always; chosen_name only got us to this point.
+        args.mode = "camera"
+        args.modules = "followme"
+
+    if not args.mode:
+        parser.error("--mode is required when --modules pretrigger or followme")
     if args.mode == "video" and not args.video:
         parser.error("--video is required when --mode video")
     if not args.gesture_method:
