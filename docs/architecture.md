@@ -35,21 +35,33 @@ alongside the legacy pipeline (`--modules both` runs `estop` + `wave_facing` on 
 
 ```
 main.py                          Entry point — the only file that imports across modules
+register_person.py               A second composition root (see below) — the registration UI
+registration_data.py             Layer 1 of register_person: filesystem state, CRUD, building
+                                  both registry files
+registration_overlay.py          Layer 2 of register_person: pure frame-in/image-out drawing
 config/thresholds.yaml           All tunable parameters, one section per module
 docs/                            This documentation set
 plans/                           Original per-module design specs (01-04)
 modules/
   emergency_stop/                Collision-avoidance safety layer (runway + 3-zone STOP logic)
-  human_detection/                Whole-frame person detector + ByteTrack (legacy pipeline)
+  human_detection/                Whole-frame person detector + ByteTrack (also used standalone by
+                                   register_person.py to gate the BACK capture phase)
   wave_facing_gate/               Gesture Method 1: MoveNet pose geometry + motion (+ facing-camera gate)
   face_identity/                  Face detect + match against a registered-person database
   human_detection_roi/            ROI-scoped body detector, triggered by a matched face
   gesture_hand_keypoint/          Gesture Method 2: MediaPipe hand-shape sequence classifier
   gesture_trajectory_verifier/    Gesture Method 3: MoveNet wrist/elbow/shoulder trajectory matching
-  appearance_verifier/            OSNet Re-ID — "does this crop look like this reference set" (shared dependency of target_tracking + target_recovery)
-  target_tracking/                Post-trigger: locks a target, records an appearance reference set, tracks frame-to-frame, reports steering deviation
-  target_recovery/                Post-trigger: re-acquires a lost target via face match (primary) or appearance fallback
-  followme_orchestrator/          Composes ALL of the above into one steppable step(frame, timestamp) -> FollowMeCommand — see below
+  appearance_verifier/            OSNet Re-ID (shared dependency of target_tracking + target_recovery,
+                                   both superseded — see Post-trigger flow below)
+  target_tracking/                SUPERSEDED by autocar_adapter (below) — kept until the
+                                   replacement is confirmed working, then deleted (docs not updated further)
+  target_recovery/                SUPERSEDED by autocar_adapter (below) — same status
+  autocar/                        Vendored tracking+recovery backbone (vinhh9608-byte/Autocar,
+                                   commit 27ee33a) — YOLOv8-pose + ByteTrack + OSNet TargetLock,
+                                   pulled in via `git clone` and kept COMPLETELY UNMODIFIED, not
+                                   even a new file added to this directory. See "Post-trigger flow" below.
+  followme_orchestrator/          Composes face-first + autocar_adapter (below) into one steppable
+                                  step(frame, timestamp) -> FollowMeCommand — see below
 ```
 
 Each module directory has exactly one importable file, `interface.py` — everything else in that
@@ -85,6 +97,16 @@ explicitly. **`modules/followme_orchestrator/` is the one deliberate, documented
 It still never reaches into any composed module's *private* implementation — only public
 `interface.py` contracts, exactly as `main.py` already does. This is a composition-root
 exception, not a loophole other modules should also start taking.
+
+`register_person.py` (repo root, alongside `main.py`) is a **second** composition root, for the
+same reason `main.py` is one: it composes across `face_identity` and `modules/autocar`'s vendored
+code to build both registry files from one capture session — see "Registration UI" below.
+`modules/followme_orchestrator/autocar_adapter.py` bridges into `modules/autocar/`'s vendored
+tree the same way; it lives inside `followme_orchestrator` rather than inside `modules/autocar/`
+specifically so that vendored directory stays a byte-for-byte, untouched mirror of the upstream
+clone — not even a new file is ever added there, only read from via `autocar_bootstrap.py`'s
+`sys.path` bridge (the same technique their own `scripts/enroll_person.py` uses to reach its own
+sibling packages).
 
 **3. The three gesture methods share no code.** `wave_facing_gate` (Method 1),
 `gesture_hand_keypoint` (Method 2), and `gesture_trajectory_verifier` (Method 3) are
@@ -145,105 +167,174 @@ already matched a registered person (`plans/02`'s explicit design constraint). M
 registered people in the same frame are each evaluated independently; the pipeline does not pick
 "the" person.
 
-### Post-trigger flow: tracking, recovery + steering (`plans/05-08`)
+### Post-trigger flow: tracking, recovery + steering (`plans/05-08`, backbone replaced since)
 
-Four further modules extend the face-first pipeline past `TRIGGER = is_waving` — each built and
-independently testable (its own `test_*.py`/`visualize_*.py`), and composed together into one
-steppable pipeline by `modules/followme_orchestrator/` (`plans/08`, the isolation exception
-noted in design rule #2 above). `main.py --modules followme` is a thin wrapper around that
-composed pipeline; `main.py --modules pretrigger` still stops at the trigger, for calibrating
-the pre-trigger stages in isolation. To exercise the FULL flow, either
-`python main.py --mode camera --modules followme --gesture-method <method> --show` or
-`python -m modules.followme_orchestrator.visualize_followme_orchestrator` directly (the latter
-has a richer debug overlay) — see [`commands.md`](commands.md).
+The face-first pipeline extends past `TRIGGER = is_waving` into tracking/recovery/steering,
+composed into one steppable pipeline by `modules/followme_orchestrator/` (`plans/08`, the
+isolation exception noted in design rule #2 above). `main.py --modules followme` is a thin
+wrapper around that composed pipeline; `main.py --modules pretrigger` still stops at the trigger,
+for calibrating the pre-trigger stages in isolation. To exercise the FULL flow, either
+`python main.py --gesture-method <method> --show` (via the registration UI's "Follow Me" button,
+or `--modules followme` directly) or
+`python -m modules.followme_orchestrator.visualize_followme_orchestrator` (the latter has a
+richer debug overlay) — see [`commands.md`](commands.md).
+
+The tracking+recovery engine originally spec'd in `plans/06`/`plans/07` (this project's own
+`target_tracking`/`target_recovery`, dynamic on-the-fly reference capture, built on
+`appearance_verifier`'s OSNet-via-torchreid) has been **replaced** by a teammate's already-built
+tracking+recovery backbone (`vinhh9608-byte/Autocar`), vendored unmodified at `modules/autocar/`
+and driven by `modules/followme_orchestrator/autocar_adapter.py`. The old modules are still
+present (not yet deleted, pending final confirmation the replacement works end-to-end) but are no
+longer in the call path — `followme_orchestrator/pipeline.py` calls `autocar_adapter` exclusively.
 
 ```mermaid
 flowchart TD
-    W["followme_orchestrator.step(frame, ts)\nWAITING_FOR_TRIGGER: runs the face-first\npre-trigger sequence every call (see diagram above)"] -->|"gesture TRIGGER goes GREEN"| S["target_tracking.start(initial_bbox, frame, ts)"]
-    S --> REC["RECORDING\n(collect crops -> appearance_verifier.build_reference_set())"]
-    REC --> TRK["TRACKING\nhorizontal_offset every frame -> SteeringController.update()\n+ periodic appearance_verifier.verify() re-check"]
-    TRK -->|track lost, or 2 consecutive failed re-verifies| LOST["state = LOST\n(hands off reference_set)"]
-    LOST --> RS["target_recovery.start(reference_set, target_person_name, ts)"]
-    RS --> SEARCH["SEARCHING\nPath A: face_identity + human_detection_roi (primary, every frame)\nPath B: whole-frame detect + appearance_verifier.verify() (fallback, after N consecutive Path-A failures)"]
-    SEARCH -->|REACQUIRED| RESET["target_tracking.reset(fresh_bbox, frame, ts)\nSteeringController.reset(); should_move=True next cycle"]
-    RESET --> REC
-    SEARCH -->|TIMEOUT| STOPPED["should_move=False, debug_state=STOPPED"]
-    STOPPED -->|"next step() call auto-resumes\n(confirmed with the user — no external reset needed)"| W
+    W["followme_orchestrator.step(frame, ts)\nWAITING_FOR_TRIGGER: runs the face-first\npre-trigger sequence every call (see diagram above)"] -->|"gesture TRIGGER goes GREEN"| S["autocar_adapter.start(person_name, initial_bbox, frame, ts)\nforce-locks via one IoU-matched detect+track pass\n(skips their own ACQUIRING — identity already proven)"]
+    S --> TRK["TRACKING\nhorizontal_offset every frame -> SteeringController.update()\n(their TargetLock trusts the ByteTrack id while it's present — zero re-id cost)"]
+    TRK -->|"locked track_id vanishes\n(e.g. occlusion)"| SEARCH["SEARCHING\ntheir TargetLock's own reclaim logic, checked every update():\nany BRAND-NEW track this frame vs. the enrolled profile"]
+    SEARCH -->|reclaimed via a re-id match| TRK
+    SEARCH -->|recovery_timeout_seconds elapsed| LOST["state = LOST\nshould_move=False, debug_state=STOPPED"]
+    LOST -->|"next step() call auto-resumes\n(confirmed with the user — no external reset needed)"| W
 ```
 
-- **`target_tracking`** (`modules/target_tracking/`) locks onto the triggering person's bbox,
-  records a short set of reference appearance frames (`RECORDING`), then follows them
-  frame-to-frame via its own isolated YOLO+ByteTrack instance (`TRACKING`), reporting a
-  normalized horizontal deviation from frame-center each frame for downstream steering. A
-  periodic `appearance_verifier.verify()` re-check guards against ByteTrack silently
-  reassigning the tracked `track_id` to a different nearby person after an occlusion — motion
-  continuity alone is never treated as identity confirmation.
-- **`target_recovery`** (`modules/target_recovery/`) takes over once `target_tracking` reports
-  `LOST`, searching the whole frame to re-acquire the same registered person — face-based first
-  (cheap when the face is visible), appearance-based as a fallback (works even facing away/
-  occluded, at the cost of `appearance_verifier`'s two accuracy risks).
-- **`appearance_verifier`** (`modules/appearance_verifier/`) is the shared OSNet-based capability
-  both of the above call into — it holds no state of its own and answers one question only:
-  "does this crop match this reference set."
+- **`modules/autocar/`** is their vendored `detector/` (YOLOv8-pose) + `tracker/` (ByteTrack) +
+  `identity/` (`TargetLock`, OSNet-based re-id via a local ONNX checkpoint) + `config.py`, pulled
+  in with `git clone` at commit `27ee33a` and never edited — not even a new file added to that
+  directory. `TargetLock` already conflates tracking-while-present and recovery-on-loss into one
+  state machine (its own `ACQUIRING`/`LOCKED` split), so there is no longer a separate recovery
+  module or call site — one `autocar_adapter.update()` call does both jobs every frame.
+- **`modules/followme_orchestrator/autocar_adapter.py`** is the ONLY file that imports from
+  `modules/autocar/`. It force-locks onto the trigger's bbox via one IoU-matched detect+track
+  pass at `start()` (skipping their own multi-round `ACQUIRING` face-sampling entirely, since
+  `face_identity` + the gesture trigger already proved identity more precisely than that would),
+  computes `horizontal_offset` from the tracked bbox each frame (not present in their code at
+  all), and wraps their otherwise-indefinite reclaim retry with a `recovery_timeout_seconds`
+  timeout (mirrors the old `target_recovery.search_timeout_seconds`'s exact
+  `is not None and elapsed >= timeout` convention — `None` means never times out). Also converts
+  between this project's `(x, y, w, h)` bbox convention and their `xyxy` one at this one seam.
+- **`modules/followme_orchestrator/autocar_bootstrap.py`** puts `modules/autocar/` itself (not
+  `modules/`) onto `sys.path` so their own internal absolute imports (`import config`, `from
+  detector.base import PoseDetector`, …) resolve — the same bootstrapping technique their own
+  `scripts/enroll_person.py` already uses for itself. Safe because nothing else in this project
+  ever does a bare `import config`/`import detector`/etc.
 - **`followme_orchestrator`** (`modules/followme_orchestrator/`) is what actually runs the loop
   above — it owns a `SteeringController` (a separate class, deliberately not merged into the
   orchestrator or any CV module — see `docs/modules.md` for the PID-timing rationale) that
   converts `horizontal_offset` into a real steering angle via `camera.fov_degrees`, then PIDs on
   it. `FollowMeCommand.should_move`/`steering_angle_degrees` are the two fields a downstream
   robot-control layer would consume; this project stops at producing that command, not driving
-  actual hardware.
+  actual hardware. `interface.draw_steering_arrow(frame, command)` draws that calculated
+  direction as an arrow from bottom-center of the frame (0° = ahead, +/- = right/left) — the
+  actual command, not a per-module debug readout, so it's drawn whenever `--show` is on,
+  independent of `--debug`.
+
+`followme_orchestrator.configure()` eagerly loads EVERY model the pipeline will use —
+`face_identity` (YuNet+EdgeFace), `human_detection_roi` (YOLO), the chosen gesture method
+(MoveNet/MediaPipe), and `autocar_adapter` (YOLO-pose+OSNet, plus one throwaway inference through
+each to absorb first-inference backend overhead too) — before it returns (confirmed with the
+user: ~3.4s once, at startup, measured end to end). Previously several of these constructed
+lazily on first real use; `autocar_adapter`'s detector/embedder in particular only used to build
+at the exact moment a gesture trigger fired, which is the worst possible time for a multi-second
+stutter. `GestureMethodAdapter.warmup()` and `autocar_adapter.warmup()` are the two new entry
+points this relies on.
+
+Registration for `autocar_adapter` requires a **pre-enrolled profile**
+(`modules/autocar/models/enrolled_<name>.npz` — front-head, back-of-head, and lower-body OSNet
+embeddings + aspect ratio) for whichever person is being followed, unlike the old
+`target_tracking`'s on-the-fly reference capture. See "Registration UI" below for how these get
+built, and `modules/autocar/models/README.md` for the OSNet ONNX weights `autocar_adapter`
+depends on (not part of the vendored repo — exported once via `torchreid`, see
+[`technologies.md`](technologies.md)).
 
 See [`docs/modules.md`](modules.md) for each module's full working principle and
 [`docs/parameters.md`](parameters.md) for their calibration status.
 
-### Legacy pipeline (`estop` / `wave_facing` / `both`)
+### Registration UI (`register_person.py` — a second composition root)
+
+Builds the two files `autocar_adapter`/`face_identity` need for a given person, from one capture
+session, via three layers (data / overlay / interact — the same separation of concerns as any
+MVC-style design, applied here for the first time in this project):
 
 ```mermaid
-flowchart TD
-    F[Full BGR frame] --> ES["emergency_stop.process_frame(frame)"]
-    F --> HD["human_detection.detect(frame)  — whole-frame YOLO + ByteTrack"]
-    HD -->|"List[PersonDetection]"| L{per detection}
-    L --> WC["crop = frame[y1:y2, x1:x2]"]
-    WC --> WF["wave_facing_gate.process_frame(track_id, crop)"]
-    WF --> T["trigger = registered_person AND is_waving AND is_facing_camera\n(registered_person always True here — no identity check)"]
+flowchart LR
+    L1["registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL detection happens here"]
+    L2["registration_overlay.py\nLayer 2 — pure frame-in/image-out\ndrawing + the ROI crop, zero I/O"]
+    L3["register_person.py\nLayer 3 — the ONLY file that reads\na camera, opens a window, or reads input"]
+    L3 -->|calls| L1
+    L3 -->|calls| L2
 ```
 
-`estop` and `wave_facing` are independent of each other even under `--modules both` — both run
-on the same frame each iteration, neither's output feeds the other. This is the original
-whole-frame demo, with no face/identity verification — `human_detection`'s ByteTrack `track_id`
-is motion-continuity only, not a verified identity.
+Capture is split into two persisted, inspectable phases, not one — **RAW** (the exact camera
+frame, no cropping, no detection) then **CROPPED** (`registration_data.build_cropped_roi()`
+reads the RAW files back and crops each to the operator-configured ROI, saving the result as its
+own file you can open and check before anything downstream ever runs on it). The Tkinter flow
+(`CaptureWindow`) genuinely pauses after cropping with an OK/Cancel dialog for exactly this
+reason. ALL detection — face detection for the face registry, pose/person detection for the re-id
+profile (picking the LARGEST bbox in each cropped image, then splitting head/lower) — happens
+only in the third phase, `registration_data.build_face_registry()`/`build_target_profile()`,
+reading the CROPPED images, never live during capture.
+
+FRONT feeds both consumers (face registry + the re-id profile's front-head/lower-body
+embeddings); BACK feeds only the re-id profile's back-of-head embedding. A fresh session
+(`registration_data.reset_captures()`) always wipes previous RAW+CROPPED photos first — Create
+and Update never mix old and new photos — but the already-built `.npz` files are only overwritten
+once a rebuild actually succeeds, so a failed session never destroys the last known-good profile.
+
+`register_person.py RegistrationApp` (Tkinter — no args) is the primary CRUD interface: New /
+Re-capture / Delete / Refresh, plus a "Follow Me" button that hands a fully-registered person's
+name back to `main.py` (via `RegistrationApp.chosen_name`) to fall through directly into the same
+`followme` camera loop `--then-followme` uses. `register_person.run()` is the same flow headless
+(plain cv2 window, no Tkinter) for scripted/one-person use — both `main.py --modules register
+--person-name <name>` and standalone `python register_person.py <name>` call it directly.
 
 ## Entry point (`main.py`)
 
+The original whole-frame `estop`/`wave_facing`/`both` demo pipeline (no face/identity
+verification) has been removed from `main.py` — the face-first pipelines below fully superseded
+it.
+
 ```
-python main.py --mode camera --modules estop
-python main.py --mode camera --modules wave_facing --show --debug
+python main.py
+    # --modules defaults to "register" — opens the Tkinter registration UI (see above)
+python main.py --gesture-method hand_keypoint --show
+    # same, but the UI's "Follow Me" button can now hand off into followme mode
 python main.py --mode camera --modules pretrigger --gesture-method hand_keypoint --show --debug
 python main.py --mode camera --modules followme --gesture-method hand_keypoint --show
 python main.py --mode video --video path.mp4 --modules followme --gesture-method trajectory_verifier --show
+python main.py --modules register --person-name Nam --then-followme --gesture-method hand_keypoint --show
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--mode camera \| video` | Live webcam vs. a recorded file (`--video` required for the latter) |
+| `--mode camera \| video` | Live webcam vs. a recorded file (`--video` required for the latter); required for `pretrigger`/`followme`, ignored/not required for `register` |
 | `--camera-index N` | OS camera device index; defaults to `config/thresholds.yaml`'s `camera.camera_index`, else `0` |
-| `--modules` | `estop` \| `wave_facing` \| `both` (legacy pipeline) \| `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) |
-| `--gesture-method` | `condition` (Method 1) \| `hand_keypoint` (Method 2) \| `trajectory_verifier` (Method 3) — required for `pretrigger`/`followme` |
+| `--modules` | `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) \| `register` (**default**) — hands off to `register_person`, not a per-frame pipeline |
+| `--gesture-method` | `condition` (Method 1) \| `hand_keypoint` (Method 2) \| `trajectory_verifier` (Method 3) — required for `pretrigger`/`followme`; only required for `register` if you intend to use `--then-followme` or the UI's "Follow Me" button |
 | `--face-registry-dir` | Path to registered-person `.npz` files (`pretrigger`/`followme` only) |
-| `--config` | Path to `thresholds.yaml` (`followme` only — passed to `followme_orchestrator.configure()`) |
+| `--config` | Path to `thresholds.yaml` — passed to `followme_orchestrator.configure()` (`followme`) or `register_person.run()` (`register`) |
+| `--person-name` | `register` only: headless single-person registration, no UI. Omit to open the Tkinter UI instead. |
+| `--front-samples` / `--back-samples` | `register` only: sample counts per capture phase (default 15 each) |
+| `--then-followme` | `register --person-name` (headless) only: on success, fall through into the same `followme` camera loop, no second command |
 | `--show` | Open a display window; without it, everything still runs and prints per-frame status lines, just no window/overlay |
-| `--debug` | Enable the full per-phase debug overlay (see below) — only has a visible effect when combined with `--show`. For `pretrigger`: face bbox + ROI region + gesture keypoints/skeleton/state. For `followme`: all of that PLUS `target_tracking`'s bbox/center-line/reverify readout and `target_recovery`'s search status, via `modules.followme_orchestrator.draw_debug()`. |
+| `--debug` | Enable the full per-phase debug overlay (see below) — only has a visible effect when combined with `--show`. For `pretrigger`: face bbox + ROI region + gesture keypoints/skeleton/state. For `followme`: all of that PLUS `autocar_adapter`'s tracked bbox/center-line/state readout, via `modules.followme_orchestrator.draw_debug()`. The steering-direction arrow is separate from `--debug` — see below. |
 
 ## Debug/visualization architecture
 
 **Every module that produces a per-frame result exposes `draw_debug()` directly on that result
 object** (`FaceIdentityResult.draw_debug(frame)`, `HumanDetectionResult.draw_debug(frame,
 matched_face_bbox)`, each `GestureMethodResult.draw_debug(crop, ...)`,
-`TrackingResult.draw_debug(frame)`, `RecoveryResult.draw_debug(frame)`) — the module returns
-data from `evaluate()`/`update()` as usual, and a *separate*, externally-callable method draws
-that same data. No caller needs to reach into a module's private internals or re-implement its
-drawing logic to get its debug overlay; every `visualize_*.py` script uses these same methods
-rather than hand-rolling the drawing a second time.
+`autocar_adapter.TrackingResult.draw_debug(frame)`) — the module returns data from
+`evaluate()`/`update()` as usual, and a *separate*, externally-callable method draws that same
+data. No caller needs to reach into a module's private internals or re-implement its drawing
+logic to get its debug overlay; every `visualize_*.py` script uses these same methods rather than
+hand-rolling the drawing a second time.
+
+Separately, `modules.followme_orchestrator.interface.draw_steering_arrow(frame, command)` draws
+the CALCULATED direction the robot is being told to move — an arrow from bottom-center of the
+frame, 0° = straight ahead, positive = right, negative = left (the exact sign convention
+`SteeringController` already uses). This is not a per-module debug overlay (it's not gated by
+`--debug`) — it's the actual robot command for this frame, so it's drawn whenever `--show` is on,
+and no-ops entirely while `should_move` is `False`.
 
 Two layers of drawing, composited because `crop`/`frame` are numpy views callers draw directly
 onto:
@@ -257,11 +348,11 @@ onto:
    - `followme`: `main.py` calls a single `modules.followme_orchestrator.draw_debug(frame)`,
      which internally calls each composed module's `draw_debug()` in turn (the same isolation
      exception that lets it compose their `evaluate()`/`step()` calls) — everything `pretrigger`
-     draws, PLUS `TrackingResult.draw_debug()` (bbox, frame-center line, reverify readout) and
-     `RecoveryResult.draw_debug()` (search status, reacquired bbox) once past the trigger.
+     draws, PLUS `autocar_adapter.TrackingResult.draw_debug()` (tracked bbox, frame-center line,
+     state readout) once past the trigger.
 2. **Pipeline-level overlay** (gated by `--show` alone) — `main.py` draws its own bounding
-   box/label per person (`pretrigger`) or state/should_move/steering summary text
-   (`followme`/legacy), drawn *after* the module overlay so it isn't occluded.
+   box/label per person (`pretrigger`) or state/should_move/steering summary text +
+   `draw_steering_arrow()` (`followme`), drawn *after* the module overlay so it isn't occluded.
 
 Every module additionally ships its own standalone CLI test/visualization script for isolated
 debugging without the rest of the pipeline:
@@ -275,9 +366,10 @@ debugging without the rest of the pipeline:
 | `human_detection_roi` | `modules/human_detection_roi/{test_human_detection_roi,visualize_human_detection_roi}.py` |
 | `gesture_hand_keypoint` | `modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,visualize_gesture_hand_keypoint}.py` |
 | `gesture_trajectory_verifier` | `modules/gesture_trajectory_verifier/{test_gesture_trajectory_verifier,visualize_gesture_trajectory_verifier}.py` |
-| `appearance_verifier` | `modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py` |
-| `target_tracking` | `modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py` |
-| `target_recovery` | `modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py` |
+| `appearance_verifier` | `modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
+| `target_tracking` | `modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py` — SUPERSEDED, same status |
+| `target_recovery` | `modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py` — SUPERSEDED, same status |
+| `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo, exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
 | `followme_orchestrator` | `modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py` — the only tool that exercises the ENTIRE pipeline end-to-end |
 
 `face_identity` also ships a two-phase registration flow, separate from testing:

@@ -137,29 +137,18 @@ Drawn on top of everything above via `modules.followme_orchestrator.draw_debug()
 tracking episode is active (the pre-trigger overlays above stop being drawn at that point — only
 one "mode" of overlay is active per frame, matching `debug_state`).
 
-### `target_tracking` — `TrackingResult.draw_debug(frame)`
+### `autocar_adapter` — `TrackingResult.draw_debug(frame)` (replaces `target_tracking`/`target_recovery` below)
 
 | Color | BGR | Meaning |
 |---|---|---|
-| 🟡 Yellow | `(0, 220, 255)` | Tracked bbox + status text — state is **RECORDING**. |
 | 🟢 Green | `(0, 200, 0)` | Tracked bbox + status text — state is **TRACKING**. |
-| 🔴 Red | `(0, 0, 255)` | Tracked bbox + status text — state is **LOST** (drawn only in the single transitional frame this result is still visible before recovery takes over the overlay). |
+| 🟠 Orange | `(0, 160, 255)` | Status text only (no bbox — nothing is currently locked) — state is **SEARCHING**. |
+| 🔴 Red | `(0, 0, 255)` | Status text only — state is **LOST**. |
 | ⚫ Gray-ish | `(120, 120, 120)` | The vertical frame-center reference line — always drawn, doesn't change with state. |
 
-Also draws a text line with the current `state`/`horizontal_offset`, and — only when at least
-one periodic appearance re-verify has run this episode — a second line with the last
-`reverify score`/`pass`, in the same state-color.
-
-### `target_recovery` — `RecoveryResult.draw_debug(frame)`
-
-| Color | BGR | Meaning |
-|---|---|---|
-| 🟡 Yellow | `(0, 220, 255)` | Status text — **SEARCHING**. |
-| 🟢 Green | `(0, 200, 0)` | Status text + reacquired bbox (3px) + `"REACQUIRED via {path}"` label — **REACQUIRED**. |
-| 🔴 Red | `(0, 0, 255)` | Status text — **TIMEOUT**. |
-
-Status text always shows `face_search_fail_count` and `elapsed_search_seconds` alongside the
-color, regardless of status.
+Also draws a text line with the current `state`/`horizontal_offset`. Unlike the old
+`target_tracking`+`target_recovery` pair, there is only ever ONE overlay here — tracking and
+recovery are the same state machine now, not two separate results handed off mid-frame.
 
 ### `followme_orchestrator` summary overlay (`main.py`'s own layer, `--show` alone)
 
@@ -171,23 +160,43 @@ own copy of the state→color mapping (`_FOLLOWME_STATE_COLOR`, matched to
 |---|---|---|
 | `WAITING_FOR_TRIGGER` | Gray | `(180, 180, 180)` |
 | `TRACKING_STARTED` | Yellow | `(0, 220, 255)` |
-| `RECORDING` | Yellow | `(0, 220, 255)` |
 | `TRACKING` | Green | `(0, 200, 0)` |
-| `RECORDING_STEERING_UNCALIBRATED` | Orange | `(0, 160, 255)` |
 | `TRACKING_STEERING_UNCALIBRATED` | Orange | `(0, 160, 255)` |
 | `RECOVERING` | Orange-red | `(0, 140, 255)` |
-| `REACQUIRED_RESUMING` | Green | `(0, 200, 0)` |
 | `STOPPED` | Red | `(0, 0, 255)` |
 
-The two `_STEERING_UNCALIBRATED` and `RECOVERING` states each get their own distinct
-orange-family shade specifically so they're visually distinguishable from plain
-RECORDING/TRACKING/REACQUIRED at a glance — "the target is genuinely being tracked/recovering,
-but `should_move` is being held `False`" is a meaningfully different situation from a clean
-green TRACKING frame, worth a different color rather than reusing yellow or red.
+(`RECORDING`, `RECORDING_STEERING_UNCALIBRATED`, and `REACQUIRED_RESUMING` no longer exist as
+states — the old `target_tracking` design had a separate RECORDING phase and a one-frame
+transitional reacquire state; `autocar_adapter` force-locks immediately at trigger time and
+resumes `TRACKING` with a real offset the same frame it reclaims, so neither is needed anymore.)
+
+`TRACKING_STEERING_UNCALIBRATED` and `RECOVERING` each get their own distinct orange-family shade
+specifically so they're visually distinguishable from plain TRACKING at a glance — "the target is
+genuinely being tracked/recovering, but `should_move` is being held `False`" is a meaningfully
+different situation from a clean green TRACKING frame, worth a different color rather than
+reusing yellow or red.
+
+### Steering-direction arrow — `draw_steering_arrow(frame, command)` (`--show` alone, NOT gated by `--debug`)
+
+| Color | BGR | Meaning |
+|---|---|---|
+| 🟡 Cyan-yellow | `(0, 255, 255)` | The arrow + angle text — the CALCULATED direction the robot is actually being commanded to move this frame. |
+
+An arrow from bottom-center of the frame: 0° points straight up (ahead), positive angles tilt
+right, negative left — the same sign convention `SteeringController.update()` uses internally.
+Distinct from every other overlay on this page in one way: it's not a per-module debug readout,
+it's the literal output being acted on, so it draws whenever `--show` is on regardless of
+`--debug`, and draws nothing at all while `should_move` is `False` (there is no "calculated
+direction" to show when the robot isn't being told to move).
 
 ---
 
-## Legacy pipeline (`--modules estop` / `wave_facing` / `both`)
+## Legacy pipeline — REMOVED from `main.py` (`--modules estop`/`wave_facing`/`both` no longer exist)
+
+`estop`/`wave_facing`/`both` are gone from `main.py --modules`'s choices — the face-first
+pipelines fully superseded this whole-frame, no-identity-check demo. `emergency_stop` and
+`human_detection` themselves still exist and are still independently runnable/testable (see
+below); only `main.py`'s dedicated modes for exercising them together are gone.
 
 ### `emergency_stop` (`main.py`'s `_ESTOP_COLOR`)
 
@@ -227,7 +236,7 @@ meaningful.
 | 🔴 Red | `(0, 0, 255)` | `match_found = False` (compared, genuinely didn't match). |
 | ⚪ Gray | `(200, 200, 200)` | `reference_frame_count == 0` — "not ready," never attempted a real comparison. Distinguish this from red: gray means no comparison happened at all, red means one happened and failed. |
 
-### `target_tracking`'s click-and-drag selection box (`visualize_target_tracking.py`)
+### `target_tracking`'s click-and-drag selection box (`visualize_target_tracking.py`, SUPERSEDED module)
 
 A fixed orange-blue `(255, 200, 0)`, 1px — purely a UI affordance while dragging out the initial
 bbox before an episode starts; not a status indicator.

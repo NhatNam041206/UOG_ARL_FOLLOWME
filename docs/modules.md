@@ -387,14 +387,21 @@ false LOST during active tracking is a different cost than a false re-acquisitio
 
 ---
 
-## `target_tracking`
+## `target_tracking` — SUPERSEDED, not in the live call path
 
-**Pipeline position:** takes over once a gesture trigger is confirmed (`is_waving` reaches
-`GREEN` in whichever gesture method is active) — driven by `modules.followme_orchestrator`
-(`main.py --modules followme`), which composes this module together with the rest of the
-pipeline (see [architecture.md](architecture.md#post-trigger-flow-tracking-recovery--steering-plans05-08)).
-Also complete and independently testable on its own. Hands off to `modules.target_recovery` on
-`LOST`.
+> **`modules.followme_orchestrator` no longer calls this module.** It now drives
+> `modules/autocar` (vendored tracking+recovery backbone) via `autocar_adapter.py` instead — see
+> [`autocar` / `autocar_adapter`](#autocar--autocar_adapter-vendored-tracking--recovery-backbone)
+> below and [architecture.md](architecture.md#post-trigger-flow-tracking-recovery--steering-plans05-08-backbone-replaced-since).
+> This module and its own `test_*.py`/`visualize_*.py` still exist and still run standalone;
+> kept until the replacement is fully confirmed, then deleted. The description below documents
+> what it does/did, for reference.
+
+**Pipeline position (historical):** took over once a gesture trigger is confirmed (`is_waving`
+reaches `GREEN` in whichever gesture method is active) — driven by `modules.followme_orchestrator`
+(`main.py --modules followme`), which composed this module together with the rest of the
+pipeline. Also complete and independently testable on its own. Handed off to
+`modules.target_recovery` on `LOST`.
 
 **Purpose:** lock onto the triggering person as "the target," record a short appearance
 reference set, track them frame-to-frame, and report how far off-center they are for downstream
@@ -461,11 +468,15 @@ working defaults confirmed with the user. See [parameters.md](parameters.md#targ
 
 ---
 
-## `target_recovery`
+## `target_recovery` — SUPERSEDED, not in the live call path
 
-**Pipeline position:** takes over once `modules.target_tracking` reports `state == LOST`. Driven
-by `modules.followme_orchestrator` (`main.py --modules followme`) — see the note on
-`target_tracking` above.
+> Same status as `target_tracking` above — `autocar_adapter`'s `TargetLock` folds recovery
+> directly into its own tracking state machine, so there is no separate recovery module/call site
+> anymore. Kept until the replacement is fully confirmed, then deleted.
+
+**Pipeline position (historical):** took over once `modules.target_tracking` reported
+`state == LOST`. Driven by `modules.followme_orchestrator` (`main.py --modules followme`) — see
+the note on `target_tracking` above.
 
 **Purpose:** re-acquire the same registered target by searching the *whole* frame (not the
 narrow region tracking was using), via two paths of different strength and cost.
@@ -523,61 +534,152 @@ narrow region tracking was using), via two paths of different strength and cost.
 
 ---
 
+## `autocar` / `autocar_adapter` (vendored tracking + recovery backbone)
+
+**Pipeline position:** takes over once a gesture trigger is confirmed — driven by
+`modules.followme_orchestrator`, which calls `autocar_adapter.start()`/`update()` exclusively
+for the post-trigger phase (replacing `target_tracking`+`target_recovery` above).
+
+**Purpose:** lock onto the triggering person, track them frame-to-frame, and automatically
+re-acquire them after an occlusion — one state machine handles both jobs, unlike the
+tracking/recovery split it replaced.
+
+**Two distinct pieces, two distinct owners:**
+- **`modules/autocar/`** — a teammate's already-built tracking+recovery engine
+  (`vinhh9608-byte/Autocar`, commit `27ee33a`), pulled in via `git clone` and kept **completely
+  unmodified** — not even a new file added to that directory. Contains their own `detector/`
+  (`YOLOv8PoseTorch`, ultralytics YOLOv8n-pose), `tracker/` (`BYTETracker`, a from-scratch
+  numpy+scipy ByteTrack implementation — no `lap`/`filterpy` dependency), `identity/`
+  (`TargetLock` — the actual state machine, `OSNetEmbedder` — ONNX-via-onnxruntime re-id
+  embedding, `face_region.py` — splits a bbox into head/lower regions using pose keypoints,
+  `target_profile.py` — the `.npz` save/load format), and their own `config.py`.
+- **`modules/followme_orchestrator/autocar_adapter.py`** — the ONLY file that imports from
+  `modules/autocar/`. Everything project-specific lives here, not in the vendored tree.
+
+**Working principle (`TargetLock`, theirs, unmodified):**
+1. **`ACQUIRING`** (no lock held): scores every visible track's HEAD region only (front-face if
+   visible, back-of-head otherwise) against the enrolled profile, over `reid_acquire_rounds`
+   sampling rounds spaced `reid_acquire_cooldown_sec` apart; the highest-average track that clears
+   `reid_similarity_threshold` gets locked.
+2. **`LOCKED`**: trusts the tracker's `track_id` continuity completely while it's still being
+   reported — **zero** re-id inference cost, no matter how many other people are nearby. Their own
+   empirical finding: whichever person is in FRONT during an overlap keeps a stable `track_id`;
+   it's the occluded person's id that disappears, never a silent hand-off to the wrong physical
+   person — so there's nothing to verify while the id is still present.
+3. **Reclaim on loss**: the moment the locked `track_id` vanishes, every track_id that's
+   brand-new this frame (not present last frame) gets scored against the enrolled profile the
+   same way as `ACQUIRING`; the best match above threshold reclaims the lock. Nothing matching →
+   the lock drops, falling back to `ACQUIRING` to search again from scratch.
+
+**What the adapter adds (not in their code at all):**
+- **Force-lock at `start()`**: runs one `detect()`+`track()` pass on the trigger frame, IoU-matches
+  the caller's bbox against the resulting tracks, and reaches directly into
+  `TargetLock.locked_track_id`/`_prev_track_ids` to lock onto it immediately — **skipping their
+  own `ACQUIRING` entirely**, since `face_identity` + the gesture trigger already proved identity
+  and location more precisely than a few rounds of face-only sampling would (and with more than
+  one person in frame, re-deriving it could momentarily lock onto the wrong one). The one
+  documented, deliberate reach into their private state — no public method does this, and their
+  file is never edited.
+- **`horizontal_offset`**: computed from the tracked bbox's center vs. frame-center each frame —
+  their code has no steering-related output at all.
+- **`recovery_timeout_seconds`**: their reclaim search retries indefinitely with no timeout on its
+  own; the adapter wraps it with a timeout mirroring `target_recovery`'s old
+  `search_timeout_seconds` convention exactly (`is not None and elapsed >= timeout` — `None` means
+  never times out).
+- **bbox convention translation**: this project uses `(x, y, w, h)`; their code uses `xyxy`
+  throughout. Converted only at this one seam.
+
+**Public contract** (`autocar_adapter.TrackingResult`): `target_locked`, `horizontal_offset`,
+`person_bbox` (x,y,w,h, full-frame), `state` (`TRACKING`/`SEARCHING`/`LOST`),
+`just_reacquired` (True only on the exact frame a mid-episode reclaim succeeds — the caller's
+signal to reset `SteeringController`'s PID state).
+
+**Key parameters:** `config/thresholds.yaml`'s `autocar:` section — detector/tracker/re-id values
+carried over as their own considered starting points (not blind guesses), plus
+`recovery_timeout_seconds` (ours, `null`/uncalibrated by default). See
+[parameters.md](parameters.md#autocar).
+
+**Requires a pre-enrolled profile** (`modules/autocar/models/enrolled_<name>.npz`) per followable
+person — unlike the old `target_tracking`, there is no on-the-fly reference capture. See
+`register_person.py` / [architecture.md](architecture.md#registration-ui-register_personpy--a-second-composition-root).
+Also requires `modules/autocar/models/osnet_x1_0_msmt17.onnx` to exist — see
+[technologies.md](technologies.md) for how it's obtained.
+
+**Known limitations:**
+- Same ByteTrack motion-continuity caveat as every other tracker in this project — their own
+  empirical claim about front-occludes-back during overlaps is trusted, not independently
+  re-verified here.
+- No true-angle/FOV-based steering computation or PID logic in `modules/autocar/` itself — same
+  architectural boundary the old `target_tracking` had; `SteeringController` still owns that.
+- `ACQUIRING`'s multi-round face-sampling logic is present in the vendored code but never actually
+  exercised in normal operation, since `start()` always force-locks successfully unless the
+  trigger frame's detector missed the person entirely (rare) — in that one fallback case,
+  `TargetLock` does run its own real `ACQUIRING` search.
+
+---
+
 ## `followme_orchestrator`
 
 **Pipeline position:** the composition root for the ENTIRE pipeline — the only module permitted
 to import across other modules' `interface.py` boundaries besides `main.py` itself (a deliberate,
 documented isolation exception — see [architecture.md](architecture.md#design-rules-apply-across-every-module)
-rule #2). Composes `face_identity`, `human_detection_roi`, all three gesture methods,
-`target_tracking`, and `target_recovery` into one `step(frame, timestamp) -> FollowMeCommand`
-call. `main.py --modules followme` is a thin CLI wrapper around this module
-(`configure()`/`step()`) — the actual sequencing logic lives here, not duplicated in `main.py`.
-`main.py --modules pretrigger` (the original `face_first` mode, renamed) still exists
-separately, stopping at TRIGGER, for calibrating the pre-trigger stages in isolation.
+rule #2). Composes `face_identity`, `human_detection_roi`, all three gesture methods, and
+`autocar_adapter` (see above) into one `step(frame, timestamp) -> FollowMeCommand` call.
+`main.py --modules followme` is a thin CLI wrapper around this module (`configure()`/`step()`) —
+the actual sequencing logic lives here, not duplicated in `main.py`. `main.py --modules
+pretrigger` (the original `face_first` mode, renamed) still exists separately, stopping at
+TRIGGER, for calibrating the pre-trigger stages in isolation.
 
 **Purpose:** so a caller doesn't need to hand-wire seven modules together the way `main.py`'s
 `pretrigger` mode does for the pre-trigger portion only — one call per frame, one command out,
 covering trigger detection all the way through steering.
 
 **Working principle:**
-1. **Pre-trigger** (mirrors `main.py --modules pretrigger`'s own sequencing exactly, per the
+1. **Eager warmup, at `configure()` time** (before `step()` is ever called): every model this
+   pipeline will use — `face_identity`, `human_detection_roi`, the chosen gesture method, and
+   `autocar_adapter`'s YOLO-pose+OSNet (plus one throwaway inference through each, absorbing a
+   backend's first-inference cost too) — is constructed right here, eagerly. `configure()` itself
+   therefore takes a few seconds; the trade is deliberate (confirmed with the user) — that cost
+   is paid once at startup, never live, and specifically never at the exact moment a gesture
+   trigger fires (autocar_adapter's detector/embedder used to construct lazily inside `start()`,
+   which is the worst possible moment for a multi-second stutter).
+2. **Pre-trigger** (mirrors `main.py --modules pretrigger`'s own sequencing exactly, per the
    spec's own audit instruction to replicate rather than reinvent it): `face_identity.evaluate()` →
    filter to `is_registered_match` → `human_detection_roi.evaluate()` per matched face → crop →
    the chosen gesture method's `evaluate()`. The **first** registered person whose gesture
    reaches `GREEN` this frame becomes the locked target — only one follow-me episode can ever be
-   active (both `target_tracking` and `target_recovery` are themselves single-episode
-   module-level singletons) — and `target_tracking.start()` fires immediately.
-2. **Post-trigger**: `target_tracking.update()` every frame. While `RECORDING`/`TRACKING`, its
+   active (`autocar_adapter` is itself a single-episode module-level singleton) — and
+   `autocar_adapter.start(person_name, ...)` force-locks immediately (see above).
+3. **Post-trigger**: `autocar_adapter.update()` every frame. While `TRACKING`, its
    `horizontal_offset` feeds `SteeringController.update()` (see below) to produce a real steering
    angle — unless the steering config is still uncalibrated, in which case `should_move` is
    forced `False` (fail-closed, consistent with every other module in this project) even though
-   the target is genuinely still being tracked.
-3. **On `LOST`**: `target_recovery.start()`/`update()` take over. `REACQUIRED` calls
-   `target_tracking.reset()` with the fresh bbox and resets the `SteeringController`'s
-   accumulated PID state (stale error history from before the loss must not bleed into the
-   resumed episode); the transitional frame itself reports `should_move=True` with the angle
-   held at `0.0°` (no fresh `horizontal_offset` exists yet that exact frame — real steering
-   resumes the very next `step()` call). `TIMEOUT` stops the robot and **auto-resumes** watching
-   for a brand-new trigger (confirmed with the user, over requiring an explicit external reset
-   call) — the next `step()` call simply falls back into the pre-trigger sequence on its own.
-   `SEARCHING` reports `should_move=False` (the robot moves forward only while actively
-   following; searching is not an actively-following state).
+   the target is genuinely still being tracked. If this frame is a mid-episode reclaim
+   (`just_reacquired`), `SteeringController.reset()` clears stale PID state first.
+4. **`SEARCHING`** reports `should_move=False` (the robot moves forward only while actively
+   following). **`LOST`** (recovery timed out) stops the robot and **auto-resumes** watching for
+   a brand-new trigger (confirmed with the user, over requiring an explicit external reset call)
+   — the next `step()` call simply falls back into the pre-trigger sequence on its own. Unlike the
+   old `target_tracking`/`target_recovery` split, a successful reclaim resumes `TRACKING` on the
+   very same frame with a real `horizontal_offset` already available — no transitional
+   angle-held-at-zero frame is needed anymore.
 
 **Public contract** (`FollowMeCommand`): `should_move` (bool, no speed parameter — speed is a
 separate downstream concern), `steering_angle_degrees` (signed, `None` when `should_move` is
 `False`), `debug_state` (this module's own state-name choices — `WAITING_FOR_TRIGGER`,
-`TRACKING_STARTED`, `RECORDING`/`TRACKING` (reused directly from `target_tracking`'s own state
-names), `RECORDING_STEERING_UNCALIBRATED`/`TRACKING_STEERING_UNCALIBRATED`, `RECOVERING`,
-`REACQUIRED_RESUMING`, `STOPPED`). `configure(gesture_method=...)` **must** be called before the
-first `step()` — unlike every other module's `configure()`, there is no sensible default gesture
-method to lazily initialize with.
+`TRACKING_STARTED`, `TRACKING`, `TRACKING_STEERING_UNCALIBRATED`, `RECOVERING`, `STOPPED`).
+`configure(gesture_method=...)` **must** be called before the first `step()` — unlike every other
+module's `configure()`, there is no sensible default gesture method to lazily initialize with.
+`draw_steering_arrow(frame, command)` draws the calculated steering direction as an arrow from
+bottom-center of the frame (0° = ahead, +/- = right/left) — not gated by `--debug`, since it's the
+actual robot command, not a per-module debug readout; no-ops while `should_move` is `False`.
 
 **Key parameters:** none of its own beyond what it composes — see `camera.fov_degrees` and the
 `steering` section below (owned by `SteeringController`).
 
 **Known limitations:**
 - Inherits every composed module's own known limitations wholesale (ByteTrack motion-only
-  identity, both `appearance_verifier` accuracy risks, etc.) — not re-explained here.
+  identity, `autocar_adapter`'s OSNet accuracy caveats, etc.) — not re-explained here.
 - No speed/velocity control of any kind — `should_move` is a boolean only, by explicit project
   decision.
 - No direct hardware/servo interface — this module outputs a `FollowMeCommand`; whatever

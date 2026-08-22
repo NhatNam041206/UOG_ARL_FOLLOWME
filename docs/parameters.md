@@ -250,11 +250,12 @@ run the two test scenarios above before trusting any threshold value.
 
 ---
 
-## `target_tracking` (plans/06)
+## `target_tracking` (plans/06) — SUPERSEDED by `autocar` below, not in the live call path
 
 Locks a gesture-trigger target, records an appearance reference set, tracks frame-to-frame, and
-reports horizontal steering deviation. Not yet wired into `main.py`'s live pipeline (see
-`docs/architecture.md`), but independently calibratable via its own `visualize_target_tracking.py`.
+reports horizontal steering deviation. `followme_orchestrator` now drives `modules/autocar` (see
+below) instead — kept here for reference; still independently calibratable via its own
+`visualize_target_tracking.py`.
 
 | Parameter | Current | Status | Meaning | Tuning notes |
 |---|---|---|---|---|
@@ -273,10 +274,11 @@ periodic reverify score (only shown on frames it actually runs).
 
 ---
 
-## `target_recovery` (plans/07)
+## `target_recovery` (plans/07) — SUPERSEDED by `autocar` below, not in the live call path
 
 Re-acquires a target `target_tracking` reported LOST — face-based primary path, appearance-based
-fallback. Not yet wired into `main.py`'s live pipeline (see `docs/architecture.md`).
+fallback. `autocar_adapter`'s `TargetLock` folds this directly into its own tracking state
+machine now, so there's no separate recovery step — kept here for reference.
 
 | Parameter | Current | Status | Meaning | Tuning notes |
 |---|---|---|---|---|
@@ -290,6 +292,53 @@ fallback. Not yet wired into `main.py`'s live pipeline (see `docs/architecture.m
 watch which path is currently active and the running `face_search_fail_count`/elapsed-vs-timeout
 countdown, and confirm `REACQUIRED` triggers correctly via both paths independently (occlude the
 face to force Path B).
+
+---
+
+## `autocar` (vendored tracking + recovery backbone, replaces `target_tracking`/`target_recovery` above)
+
+Read only by `modules/followme_orchestrator/autocar_adapter.py` — never by
+`modules/autocar/config.py` itself (their vendored file, never edited; these values are passed
+into their classes' own constructor override parameters instead). Detector/tracker/re-id values
+below are carried over AS-IS from their own `config.py` — their own considered starting points,
+not blind guesses, so treated as 🟡 starting guesses rather than 🔴 uncalibrated.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `detect_conf` | 0.4 | 🟡 | YOLOv8-pose detection confidence floor. Low on purpose — their ByteTrack itself filters by score in two tiers. | Carried from their `DETECT_CONF`; recalibrate only if their own tracker's two-tier filtering proves wrong for this project's footage. |
+| `detect_imgsz` | 300 | 🟡 | YOLOv8-pose inference resolution. | ultralytics auto-rounds to a multiple of 32 (300→320) — expect that log line, it's not an error. |
+| `track_high_thresh` / `track_low_thresh` / `new_track_thresh` / `match_thresh` / `low_match_thresh` / `track_buffer` | 0.6 / 0.1 / 0.7 / 0.8 / 0.5 / 30 | 🟡 each | Their ByteTrack's own tuning knobs — high/low score tiers, IoU match thresholds per stage, how many frames a lost track survives before being dropped. | Carried from their `config.py` unmodified; see `modules/autocar/tracker/byte_tracker.py`'s own docstring for what each does. |
+| `reid_similarity_threshold` | 0.75 | 🟡, **especially uncalibrated** | Cosine similarity cutoff for `TargetLock`'s head-region re-id match. Same OSNet accuracy caveats as `appearance_verifier.similarity_threshold` above — similar-clothing confusion, cross-domain generalization drop (this project's footage vs. MSMT17 training data). | Do not trust past a first smoke test; calibrate against this project's own footage before relying on recovery accuracy. |
+| `reid_face_min_keypoint_conf` | 0.5 | 🟡 | Nose+eye keypoint confidence floor for "face visible" (decides front-face vs. back-of-head reference). | Carried from their `REID_FACE_MIN_KEYPOINT_CONF`. |
+| `reid_head_split_fallback_fraction` | 0.35 | 🟡 | Head-region height as a fraction of bbox height, used only when shoulder keypoints aren't confident enough to place the split line precisely. | Carried from their `REID_HEAD_SPLIT_FALLBACK_FRACTION`. |
+| `reid_acquire_rounds` / `reid_acquire_cooldown_sec` | 3 / 0.5 | 🟡 each | How many face-only sampling rounds (and the wall-clock gap between them) before `ACQUIRING` picks a target. Only exercised via the adapter's IoU-force-lock fallback path — normal triggers skip `ACQUIRING` entirely (see `docs/modules.md`). | Low-priority to calibrate given how rarely this path runs in practice. |
+| `recovery_timeout_seconds` | `null` | 🔴 (**ours, not theirs**) | Their own reclaim search retries indefinitely with no timeout at all — this closes that gap, mirroring `target_recovery.search_timeout_seconds`'s exact convention. While `null`, a lost target is searched for forever, never reporting back to `followme_orchestrator`. | Spec-equivalent starting range to the old `target_recovery.search_timeout_seconds` (~1–2 minutes) is a reasonable starting point. |
+| `device` | `"cpu"` | 🟢 | `"cpu"` or `"cuda:0"`, passed straight through to their detector/embedder. | Override only if running on a machine with a usable CUDA GPU. |
+
+**How to tune:** `cd modules/autocar && python main.py --source 0 --target
+models/enrolled_<name>.npz` exercises their tracking+recovery engine directly (their own
+`ACQUIRING`, not the adapter's force-lock) — good for isolating whether a bad result is the
+engine/profile or the adapter's own logic. For the full composed pipeline, use
+`modules.followme_orchestrator.visualize_followme_orchestrator`.
+
+---
+
+## `register_person` (`register_person.py` — not a per-frame pipeline module)
+
+The ROI a detection must fall inside during capture to count as a sample — see
+`registration_overlay.crop_to_roi()`. Not calibration-gated (no fail-closed behavior): both keys
+have reasonable starting-box defaults so the tool works out of the box, adjust to match your
+actual camera framing.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `front_roi_percent` | `[0.20, 0.05, 0.80, 0.95]` | 🟡 | `[x1,y1,x2,y2]`, frame-fraction box checked against the detected FACE bbox during FRONT capture (in the earlier ROI-gated design) / used to crop the saved RAW frame (current design — see `docs/architecture.md`'s Registration UI section). | Widen/narrow to match how far back the subject stands from the camera during registration. |
+| `back_roi_percent` | `[0.15, 0.0, 0.85, 1.0]` | 🟡 | Same, for BACK capture — wider by default since a turned-around body silhouette varies more than a face. | Same tuning approach as `front_roi_percent`. |
+
+**How to tune:** run `python register_person.py` (Tkinter UI) or `python register_person.py
+<name>` (headless) and watch the drawn ROI box live — the Tkinter flow's post-crop pause
+(`CaptureWindow`'s OK/Cancel dialog) is the actual point to check whether the box was sized
+correctly, by opening `registration_captures/<name>/cropped/` and looking at the results.
 
 ---
 
