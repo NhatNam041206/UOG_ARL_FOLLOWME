@@ -2,7 +2,9 @@
 
 Every tunable value in `config/thresholds.yaml`, what it means, what it affects, and its current
 status. This is a reference for whoever runs the empirical calibration pass — it does not itself
-calibrate anything.
+calibrate anything. For what each parameter's module actually *does* (the algorithm the
+parameter is tuning), see [`docs/modules.md`](modules.md); for how modules wire together, see
+[`docs/architecture.md`](architecture.md).
 
 ## Status legend
 
@@ -221,11 +223,156 @@ method can produce anything but "not ready."
 
 ---
 
+## `appearance_verifier` (plans/05)
+
+OSNet Re-ID embedding + cosine-similarity matching. Shared dependency of `target_tracking` and
+`target_recovery`, each of which defines its OWN separate threshold key — this section's
+`similarity_threshold` is `appearance_verifier`'s own, used only if some future caller calls
+`verify()` without going through either of those two modules' own thresholds.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `similarity_threshold` | `null` | 🔴 **⚠️ especially uncalibrated** | Cosine similarity floor `best_similarity_score` must clear for `match_found=True`. | Two documented accuracy risks make a casual "starting guess" here less trustworthy than usual — see below. Test explicitly against BOTH: (1) two DIFFERENT people in similar-colored/styled clothing (should score low — if it doesn't, that's the clothing-confusion risk manifesting), and (2) the SAME person under noticeably different lighting/distance (should score high — if it doesn't, that's the cross-domain risk manifesting). Don't set this from positive examples alone. |
+| `osnet_model_name` | `osnet_x1_0` | 🟢 | Which `torchreid` OSNet variant to build. | Override only if evaluating a different OSNet size/variant. |
+
+**Two named risks — read before calibrating, do not treat as one vague "may be inaccurate" note:**
+1. **Similar-clothing confusion.** OSNet-based appearance matching struggles to distinguish
+   people wearing similar-colored/styled clothing, since appearance embeddings lean heavily on
+   clothing as a feature.
+2. **Cross-domain generalization drop.** Published OSNet benchmarks show accuracy can drop
+   sharply on footage meaningfully different from its training distribution (Market-1501-family
+   datasets) — this project's own campus footage/lighting/camera are an untested domain.
+
+**How to tune:** run
+`python -m modules.appearance_verifier.visualize_appearance_verifier --reference-dir <folder> --mode camera`,
+watch `best_similarity_score` printed per frame against a known reference set, and specifically
+run the two test scenarios above before trusting any threshold value.
+
+---
+
+## `target_tracking` (plans/06) — SUPERSEDED by `autocar` below, not in the live call path
+
+Locks a gesture-trigger target, records an appearance reference set, tracks frame-to-frame, and
+reports horizontal steering deviation. `followme_orchestrator` now drives `modules/autocar` (see
+below) instead — kept here for reference; still independently calibratable via its own
+`visualize_target_tracking.py`.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `record_duration_seconds` | `null` | 🔴 | How long (wall-clock) the RECORDING phase collects reference crops before attempting to transition to TRACKING. Spec suggests starting ~1–2s. | Too short risks too few usable crops (triggers the extend-RECORDING path below repeatedly); too long delays TRACKING starting after a genuine trigger. |
+| `min_recording_crops` | 3 | 🟡 | Below this many usable crops when the RECORDING timer elapses, RECORDING extends (keeps existing crops, restarts the timer) rather than building a fragile reference set. Confirmed with the user over "proceed anyway" or "report a distinct failure state." | Raise if the reference set still proves too weak in practice; this is a floor, not a target — more crops is generally better appearance coverage. |
+| `appearance_reverify_interval_seconds` | `null` | 🔴 | How often (wall-clock, NOT every frame) the periodic ID-switch sanity check runs during TRACKING. | Balance cost (embedding + comparison isn't free) against how quickly a silent ID switch should be caught. |
+| `appearance_reverify_similarity_threshold` | `null` | 🔴 | Deliberately its OWN key, independent from `appearance_verifier.similarity_threshold` and `target_recovery.appearance_fallback_threshold` — a periodic sanity check during otherwise-confident tracking can reasonably use a different strictness than a full re-acquisition decision. | Calibrate against the SAME reference set / footage you'd use for `appearance_verifier.similarity_threshold`, but don't assume the same number is right here. |
+| `appearance_reverify_consecutive_failures` | 2 | 🟡 | How many CONSECUTIVE failed re-verifies are required before declaring LOST. Confirmed with the user over "1 failure = immediate LOST" — a single bad-lighting/occlusion frame shouldn't trigger a full recovery cycle. | Lower (1) is more sensitive to real ID switches but more prone to false LOSTs from a single bad frame; raise only if false LOSTs are still too frequent at 2. |
+| `track_loss_grace_period_seconds` | `null` | 🔴 | How long (wall-clock) the locked `track_id` may be missing from ByteTrack's output before declaring LOST. Applies uniformly during RECORDING and TRACKING. | Balance tolerance for brief occlusion/detector misses against how quickly a genuine loss should be reported. |
+| `yolo_model_path` | `yolo11n.onnx` | 🟢 | This module's own standalone tracker weights file. Deliberately never shared with any other module's tracker instance. | Override only to use a different model. |
+
+**How to tune:** run
+`python -m modules.target_tracking.visualize_target_tracking --mode camera`, click-and-drag a box
+around a person to start an episode, and watch the on-screen `state=`/`offset=` readout plus the
+periodic reverify score (only shown on frames it actually runs).
+
+---
+
+## `target_recovery` (plans/07) — SUPERSEDED by `autocar` below, not in the live call path
+
+Re-acquires a target `target_tracking` reported LOST — face-based primary path, appearance-based
+fallback. `autocar_adapter`'s `TargetLock` folds this directly into its own tracking state
+machine now, so there's no separate recovery step — kept here for reference.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `face_search_grace_attempts` | `null` | 🔴 | A COUNT (not a time duration — deliberate, see this module's known-limitations note in `docs/modules.md`) of consecutive Path-A (face match) failure frames before Path B (appearance fallback) is also attempted. | Too low makes the weaker Path B kick in too eagerly; too high delays fallback when the face genuinely isn't visible (facing away, occluded, too far). |
+| `appearance_fallback_threshold` | `null` | 🔴 | Deliberately its OWN key, independent from `appearance_verifier.similarity_threshold` and `target_tracking.appearance_reverify_similarity_threshold` — Path B is the LAST resort with no face corroboration at all, so this should generally be the STRICTEST of the three. | Calibrate specifically against Path B's actual failure modes (a crowd of similarly-dressed people) — see `appearance_verifier`'s two named risks above; a lenient threshold here risks reacquiring the wrong person entirely. |
+| `search_timeout_seconds` | `null` | 🔴 | Overall wall-clock search-episode abandonment clock, checked every frame regardless of which path is being tried. Spec suggests starting ~1–2 minutes. | Balance giving recovery a genuine chance against how long the robot should sit idle/searching before giving up and stopping. |
+| `yolo_model_path` | `yolo11n.onnx` | 🟢 | Path B's own standalone whole-frame detector weights file. Deliberately a fresh instance, never `human_detection`'s. | Override only to use a different model. |
+
+**How to tune:** run
+`python -m modules.target_recovery.visualize_target_recovery --target-person-name <name> --reference-dir <folder> --mode camera`,
+watch which path is currently active and the running `face_search_fail_count`/elapsed-vs-timeout
+countdown, and confirm `REACQUIRED` triggers correctly via both paths independently (occlude the
+face to force Path B).
+
+---
+
+## `autocar` (vendored tracking + recovery backbone, replaces `target_tracking`/`target_recovery` above)
+
+Read only by `modules/followme_orchestrator/autocar_adapter.py` — never by
+`modules/autocar/config.py` itself (their vendored file, never edited; these values are passed
+into their classes' own constructor override parameters instead). Detector/tracker/re-id values
+below are carried over AS-IS from their own `config.py` — their own considered starting points,
+not blind guesses, so treated as 🟡 starting guesses rather than 🔴 uncalibrated.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `detect_conf` | 0.4 | 🟡 | YOLOv8-pose detection confidence floor. Low on purpose — their ByteTrack itself filters by score in two tiers. | Carried from their `DETECT_CONF`; recalibrate only if their own tracker's two-tier filtering proves wrong for this project's footage. |
+| `detect_imgsz` | 300 | 🟡 | YOLOv8-pose inference resolution. | ultralytics auto-rounds to a multiple of 32 (300→320) — expect that log line, it's not an error. |
+| `track_high_thresh` / `track_low_thresh` / `new_track_thresh` / `match_thresh` / `low_match_thresh` / `track_buffer` | 0.6 / 0.1 / 0.7 / 0.8 / 0.5 / 30 | 🟡 each | Their ByteTrack's own tuning knobs — high/low score tiers, IoU match thresholds per stage, how many frames a lost track survives before being dropped. | Carried from their `config.py` unmodified; see `modules/autocar/tracker/byte_tracker.py`'s own docstring for what each does. |
+| `reid_similarity_threshold` | 0.75 | 🟡, **especially uncalibrated** | Cosine similarity cutoff for `TargetLock`'s head-region re-id match. Same OSNet accuracy caveats as `appearance_verifier.similarity_threshold` above — similar-clothing confusion, cross-domain generalization drop (this project's footage vs. MSMT17 training data). | Do not trust past a first smoke test; calibrate against this project's own footage before relying on recovery accuracy. |
+| `reid_face_min_keypoint_conf` | 0.5 | 🟡 | Nose+eye keypoint confidence floor for "face visible" (decides front-face vs. back-of-head reference). | Carried from their `REID_FACE_MIN_KEYPOINT_CONF`. |
+| `reid_head_split_fallback_fraction` | 0.35 | 🟡 | Head-region height as a fraction of bbox height, used only when shoulder keypoints aren't confident enough to place the split line precisely. | Carried from their `REID_HEAD_SPLIT_FALLBACK_FRACTION`. |
+| `reid_acquire_rounds` / `reid_acquire_cooldown_sec` | 3 / 0.5 | 🟡 each | How many face-only sampling rounds (and the wall-clock gap between them) before `ACQUIRING` picks a target. Only exercised via the adapter's IoU-force-lock fallback path — normal triggers skip `ACQUIRING` entirely (see `docs/modules.md`). | Low-priority to calibrate given how rarely this path runs in practice. |
+| `recovery_timeout_seconds` | `null` | 🔴 (**ours, not theirs**) | Their own reclaim search retries indefinitely with no timeout at all — this closes that gap, mirroring `target_recovery.search_timeout_seconds`'s exact convention. While `null`, a lost target is searched for forever, never reporting back to `followme_orchestrator`. | Spec-equivalent starting range to the old `target_recovery.search_timeout_seconds` (~1–2 minutes) is a reasonable starting point. |
+| `device` | `"cpu"` | 🟢 | `"cpu"` or `"cuda:0"`, passed straight through to their detector/embedder. | Override only if running on a machine with a usable CUDA GPU. |
+
+**How to tune:** `cd modules/autocar && python main.py --source 0 --target
+models/enrolled_<name>.npz` exercises their tracking+recovery engine directly (their own
+`ACQUIRING`, not the adapter's force-lock) — good for isolating whether a bad result is the
+engine/profile or the adapter's own logic. For the full composed pipeline, use
+`modules.followme_orchestrator.visualize_followme_orchestrator`.
+
+---
+
+## `register_person` (`register_person.py` — not a per-frame pipeline module)
+
+The ROI a detection must fall inside during capture to count as a sample — see
+`registration_overlay.crop_to_roi()`. Not calibration-gated (no fail-closed behavior): both keys
+have reasonable starting-box defaults so the tool works out of the box, adjust to match your
+actual camera framing.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `front_roi_percent` | `[0.20, 0.05, 0.80, 0.95]` | 🟡 | `[x1,y1,x2,y2]`, frame-fraction box checked against the detected FACE bbox during FRONT capture (in the earlier ROI-gated design) / used to crop the saved RAW frame (current design — see `docs/architecture.md`'s Registration UI section). | Widen/narrow to match how far back the subject stands from the camera during registration. |
+| `back_roi_percent` | `[0.15, 0.0, 0.85, 1.0]` | 🟡 | Same, for BACK capture — wider by default since a turned-around body silhouette varies more than a face. | Same tuning approach as `front_roi_percent`. |
+
+**How to tune:** run `python register_person.py` (Tkinter UI) or `python register_person.py
+<name>` (headless) and watch the drawn ROI box live — the Tkinter flow's post-crop pause
+(`CaptureWindow`'s OK/Cancel dialog) is the actual point to check whether the box was sized
+correctly, by opening `registration_captures/<name>/cropped/` and looking at the results.
+
+---
+
 ## `camera`
 
-| Parameter | Meaning |
-|---|---|
-| `camera_index` | OS camera device index used by `main.py --mode camera` when `--camera-index` isn't passed on the command line. Not a calibration value — just which physical camera to open. |
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `camera_index` | 2 | 🟢 | OS camera device index used by `main.py --mode camera` when `--camera-index` isn't passed on the command line. Not a calibration value — just which physical camera to open. | Override via `--camera-index` or this key. |
+| `fov_degrees` | 85.0 | 🟢 | Horizontal field of view, in degrees — this project's camera hardware datasheet value. A fixed PHYSICAL lens property, not empirically tuned like most values in this file, but it gates `followme_orchestrator.SteeringController` (plans/08): without it, `horizontal_offset` can never become a real steering angle at all, and `should_move` stays forced `False` while actively tracking. | Set from the actual camera hardware's own datasheet, never guessed or tuned like a threshold. |
+| `lens_type` | `"hybrid"` | 🟢 | Informational only — documents the camera's physical lens type. Never consumed by any calculation. | Update if the hardware changes; no downstream effect either way. |
+| `focus_type` | `"fixed"` | 🟢 | Informational only, same rationale as `lens_type`. Recorded specifically because a FIXED-focus camera is what makes treating `fov_degrees` as one constant safe — a variable-focus/zoom lens would need FOV to become a function of zoom level instead. | Not this project's hardware situation currently; flag prominently if it ever changes. |
+
+---
+
+## `steering` (plans/08 — `followme_orchestrator.SteeringController`)
+
+PID conversion of `target_tracking`'s normalized `horizontal_offset` into a real steering angle
+(via `camera.fov_degrees` above) for the Ackermann servo. All 4 keys are required — while any is
+`null`, `SteeringController.is_calibrated()` is `False` and the orchestrator forces
+`should_move=False` even while a target is genuinely still being tracked (same fail-closed
+convention as every other module in this project).
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `kp` | `null` | 🔴 | Proportional gain — output contribution directly proportional to the current error (degrees off-center). | Start here: raise until the robot turns promptly toward the target without excessive overshoot, with `ki`/`kd` still at 0. |
+| `ki` | `null` | 🔴 | Integral gain — accumulates error over time, corrects small persistent offsets a proportional-only controller would leave uncorrected. | Add only after `kp` alone leaves a visible steady-state offset; too high causes slow oscillation ("integral windup"). |
+| `kd` | `null` | 🔴 | Derivative gain — dampens oscillation by reacting to the RATE of change of error, not just its current value. | Add last, after `kp`/`ki` are reasonable, specifically to damp any overshoot/oscillation those introduce. |
+| `max_steering_angle_degrees` | `null` | 🔴 | Hard clamp on `SteeringController.update()`'s output — an Ackermann/servo hardware limit, NOT a tuning target. | Set from the actual servo/Ackermann mechanism's own datasheet limit, not empirically guessed. |
+
+**How to tune:** run
+`python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method <method> --mode camera`,
+trigger a follow episode, and watch the live `steering=` readout while adjusting `kp`/`ki`/`kd`
+in `config/thresholds.yaml` between runs — classic PID tuning order (`kp` first, then `ki`, then
+`kd`), against the real Ackermann hardware once available, not simulated/guessed values.
 
 ---
 

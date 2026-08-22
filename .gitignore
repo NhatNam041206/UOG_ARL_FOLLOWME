@@ -14,15 +14,27 @@ Thumbs.db
 # Pretrained model weights — large binaries, fetched separately rather than versioned.
 # See each model's own module for the download source if these need restoring.
 /yolo11n.onnx
+# ultralytics auto-download cache — YOLOv8PoseTorch's default weights, lands at repo root
+/yolov8n-pose.pt
 modules/*/models/*.onnx
 modules/*/models/*.task
+modules/*/models/*.pth
+modules/*/models/*.pt
 
-# Personal biometric data — captured face photos and their embeddings. Kept out of git by
-# default since these identify a real person; remove these lines if you actually want them
+# Personal biometric data — captured face photos and their embeddings, and enrolled
+# re-identification profiles (front/back head + lower-body appearance embeddings). Kept out of
+# git by default since these identify a real person; remove these lines if you actually want them
 # backed up in this repo.
 modules/face_identity/raw_captures/*
 !modules/face_identity/raw_captures/.gitkeep
 modules/face_identity/registry_data/*.npz
+modules/*/models/*.npz
+# register_person.py's own raw capture output (front+back frames, both consumers' Phase 2 input)
+registration_captures/
+
+# Autocar vendor tree (modules/autocar) — abandoned GRU wave-classifier training data, not
+# wired into any code path (confirmed unused before vendoring); no reason to version it here.
+modules/autocar/data/*.npz
 
 # Captured gesture reference trajectories (motion data, not biometric, but still per-user
 # runtime data rather than source).
