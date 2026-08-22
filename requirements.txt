@@ -4,6 +4,7 @@ torchvision>=0.15.0
 opencv-python>=4.8.0
 pyyaml>=6.0
 numpy>=1.24.0
+scipy>=1.10.0
 onnx>=1.14.0
 onnxruntime>=1.15.0
 onnxslim>=0.1.0

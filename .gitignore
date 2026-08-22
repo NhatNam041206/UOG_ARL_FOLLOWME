@@ -17,13 +17,20 @@ Thumbs.db
 modules/*/models/*.onnx
 modules/*/models/*.task
 modules/*/models/*.pth
+modules/*/models/*.pt
 
-# Personal biometric data — captured face photos and their embeddings. Kept out of git by
-# default since these identify a real person; remove these lines if you actually want them
+# Personal biometric data — captured face photos and their embeddings, and enrolled
+# re-identification profiles (front/back head + lower-body appearance embeddings). Kept out of
+# git by default since these identify a real person; remove these lines if you actually want them
 # backed up in this repo.
 modules/face_identity/raw_captures/*
 !modules/face_identity/raw_captures/.gitkeep
 modules/face_identity/registry_data/*.npz
+modules/*/models/*.npz
+
+# Autocar vendor tree (modules/autocar) — abandoned GRU wave-classifier training data, not
+# wired into any code path (confirmed unused before vendoring); no reason to version it here.
+modules/autocar/data/*.npz
 
 # Captured gesture reference trajectories (motion data, not biometric, but still per-user
 # runtime data rather than source).

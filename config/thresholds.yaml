@@ -255,3 +255,44 @@ target_recovery:
   appearance_fallback_threshold: null    # TODO: calibrate — deliberately its OWN key, independent from appearance_verifier.similarity_threshold and target_tracking.appearance_reverify_similarity_threshold
   search_timeout_seconds: null           # TODO: calibrate — spec suggests ~1-2 minutes as a starting range
   # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance for Path B's whole-frame detection
+
+# Vendored tracking+recovery backbone (modules/autocar — vinhh9608-byte/Autocar, commit 27ee33a),
+# slated to replace target_tracking + target_recovery above once wired in and confirmed working
+# (see modules/autocar/README.md and the project's own integration plan — module stays named
+# "autocar" until that happens, then this section renames to target_tracking too). Their engine
+# (detector/, tracker/, identity/, config.py) is kept UNMODIFIED per that decision; every value
+# below is only ever read by the NEW adapter code we write in modules/autocar/interface.py +
+# pipeline.py (not yet built) and passed into their classes' own constructor overrides — their
+# vendored config.py is never edited.
+#
+# Detector/tracker/re-id values are carried over as-is from their own config.py — those are
+# their own considered starting points, not values we invented, so treated as STARTING GUESSES
+# (same status as this project's other uncalibrated defaults) rather than blind guesses.
+# recovery_timeout_seconds has no equivalent in their code (their ACQUIRING phase retries
+# forever, no timeout) — TODO per this project's fail-closed convention: while null, the adapter
+# must not let a lost target search indefinitely without ever reporting back to
+# modules.followme_orchestrator (mirrors target_recovery.search_timeout_seconds above).
+autocar:
+  # --- Detector (their detector/yolov8_pose_torch.py) ---
+  detect_conf: 0.4              # STARTING GUESS, carried from their config.py DETECT_CONF
+  detect_imgsz: 300              # STARTING GUESS, carried from their config.py DETECT_IMGSZ
+  # pose_model_path: "yolov8n-pose.pt"  # optional override, auto-downloaded by ultralytics like our own weights
+
+  # --- Tracker (their tracker/byte_tracker.py) ---
+  track_high_thresh: 0.6         # STARTING GUESS, carried from their config.py TRACK_HIGH_THRESH
+  track_low_thresh: 0.1          # STARTING GUESS, carried from their config.py TRACK_LOW_THRESH
+  new_track_thresh: 0.7          # STARTING GUESS, carried from their config.py NEW_TRACK_THRESH
+  match_thresh: 0.8              # STARTING GUESS, carried from their config.py MATCH_THRESH
+  low_match_thresh: 0.5          # STARTING GUESS, carried from their config.py LOW_MATCH_THRESH
+  track_buffer: 30               # STARTING GUESS, carried from their config.py TRACK_BUFFER
+
+  # --- Re-ID / TargetLock (their identity/target_lock.py) ---
+  reid_similarity_threshold: 0.75        # STARTING GUESS, carried from their config.py REID_SIMILARITY_THRESHOLD — ESPECIALLY uncalibrated, same OSNet accuracy caveats as appearance_verifier above
+  reid_face_min_keypoint_conf: 0.5       # STARTING GUESS, carried from their config.py REID_FACE_MIN_KEYPOINT_CONF
+  reid_head_split_fallback_fraction: 0.35  # STARTING GUESS, carried from their config.py REID_HEAD_SPLIT_FALLBACK_FRACTION
+  reid_acquire_rounds: 3                 # STARTING GUESS, carried from their config.py REID_ACQUIRE_ROUNDS — only used on initial force-lock IoU fallback, not the normal trigger path
+  reid_acquire_cooldown_sec: 0.5         # STARTING GUESS, carried from their config.py REID_ACQUIRE_COOLDOWN_SEC
+  # reid_model_path: "modules/autocar/models/osnet_x1_0_msmt17.onnx"  # optional override — file must exist; see modules/autocar/README.md
+
+  # --- Ours, not theirs (closes the "search forever" gap noted above) ---
+  recovery_timeout_seconds: null  # TODO: calibrate — spec-equivalent to target_recovery.search_timeout_seconds above

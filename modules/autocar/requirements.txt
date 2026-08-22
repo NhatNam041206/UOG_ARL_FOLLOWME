@@ -1,0 +1,7 @@
+# PC development/test requirements (Python >= 3.8).
+# The Jetson Nano itself needs a separate, much narrower runtime env - see
+# README once the TensorRT deployment backend is added.
+ultralytics>=8.1.0
+opencv-python>=4.8
+numpy>=1.24
+scipy>=1.10

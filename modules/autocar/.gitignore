@@ -1,0 +1,41 @@
+# Python environments - never commit these, they're huge and machine-specific.
+.venv/
+.venv-*/
+.autocarvenv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Build/runtime artifacts - regenerated locally, not source.
+logs/
+*.log
+
+# Hardware-locked / auto-downloadable artifacts - not your original work,
+# regenerate locally instead of versioning (see README "Export ONNX ->
+# TensorRT engine"). TensorRT engines in particular are hardware+version
+# locked and meaningless on a different machine.
+models/*.engine
+*.onnx
+yolov8*.pt
+models/osnet_*.pth
+
+# Migration backups (scripts/migrate_action_data_drop_face.py) - redundant
+# with the file they back up, no need to version.
+*.bak.npz
+
+# Video files - can get large; un-ignore specific ones if you want to version
+# a small sample clip.
+data/*.mp4
+data/*.avi
+
+# models/*.pt (your trained GRU checkpoints) and data/*.npz (your collected
+# training data) are intentionally NOT ignored - they're your actual work
+# and small enough to version normally.
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude
