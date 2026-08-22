@@ -12,14 +12,14 @@ pre-trigger portion only.
 
     step(frame, timestamp):
       NOT currently tracking -> face_identity -> human_detection_roi -> gesture method ->
-        is_waving GREEN? -> modules.target_tracking.start(...)
-      currently tracking -> modules.target_tracking.update(...)
-        RECORDING/TRACKING -> SteeringController.update(horizontal_offset, timestamp)
-        LOST -> modules.target_recovery.start/update(...)
-          REACQUIRED -> modules.target_tracking.reset(...), resume steering next cycle
-          TIMEOUT -> stop, auto-resume watching for a fresh trigger (confirmed with the user —
-                     no separate reset call needed; the next step() call re-arms itself)
-          SEARCHING -> should_move=False (robot moves forward only while actively following)
+        is_waving GREEN? -> autocar_adapter.start(person_name, ...)
+      currently tracking -> autocar_adapter.update(...) — its TargetLock folds tracking AND
+        recovery into one state machine, so there is no separate recovery step here:
+        TRACKING -> SteeringController.update(horizontal_offset, timestamp); resets the PID if
+                    this frame is a mid-episode reclaim (just_reacquired)
+        SEARCHING -> should_move=False (robot moves forward only while actively following)
+        LOST -> stop, auto-resume watching for a fresh trigger (confirmed with the user — no
+                separate reset call needed; the next step() call re-arms itself)
 
 ISOLATION EXCEPTION, stated explicitly, not silently overridden (plans/08 §0.3): this module is
 the ONE deliberate exception to "own-instance isolation, no module imports another's
@@ -29,23 +29,25 @@ the pre-trigger portion of the face_first pipeline — a composition root, not a
 It still never reaches into any composed module's PRIVATE implementation — only public
 interface.py contracts, exactly as main.py already does today.
 
-Manages a SINGLE active follow-me episode — mirrors target_tracking/target_recovery's own
-single-episode design (both are themselves module-level singletons; this orchestrator can only
-ever follow one registered person at a time by construction, the same as those two modules).
+Manages a SINGLE active follow-me episode — mirrors autocar_adapter's own single-episode design
+(itself a module-level singleton; this orchestrator can only ever follow one registered person at
+a time by construction, the same as that adapter).
 
 `configure(gesture_method=...)` MUST be called before the first step() — unlike every other
 module's configure(), there is no sensible default gesture method to lazily initialize with
 (mirrors main.py's own --gesture-method being a required flag for --modules face_first).
 """
+import math
 from dataclasses import dataclass
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from .config import FollowMeOrchestratorConfig, load_config
 from .pipeline import FollowMeOrchestratorPipeline
 
-__all__ = ["FollowMeCommand", "configure", "step", "draw_debug"]
+__all__ = ["FollowMeCommand", "configure", "step", "draw_debug", "draw_steering_arrow"]
 
 
 @dataclass
@@ -57,12 +59,10 @@ class FollowMeCommand:
                                               # target when stopped)
     debug_state: str                         # current high-level pipeline state, for logging/
                                               # visualization (e.g. "WAITING_FOR_TRIGGER",
-                                              # "TRACKING_STARTED", "RECORDING", "TRACKING",
-                                              # "RECORDING_STEERING_UNCALIBRATED",
+                                              # "TRACKING_STARTED", "TRACKING",
                                               # "TRACKING_STEERING_UNCALIBRATED", "RECOVERING",
-                                              # "REACQUIRED_RESUMING", "STOPPED") — exact state
-                                              # names are this module's own design choice, not
-                                              # fixed by the originating spec
+                                              # "STOPPED") — exact state names are this module's
+                                              # own design choice, not fixed by the originating spec
 
 
 _pipeline_singleton: Optional[FollowMeOrchestratorPipeline] = None
@@ -74,10 +74,18 @@ def configure(gesture_method: str, thresholds_config_path: str = "config/thresho
     REQUIRED before the first step() call — (re)initializes the module-level orchestrator.
     `gesture_method`: "condition" (Method 1) | "hand_keypoint" (Method 2) |
     "trajectory_verifier" (Method 3), same choices as main.py's --gesture-method.
+
+    Eagerly loads EVERY model this pipeline will use (face_identity, human_detection_roi, the
+    chosen gesture method, and autocar_adapter's YOLO-pose+OSNet) before returning — see
+    FollowMeOrchestratorPipeline.__init__ — so none of them cold-start later during step(), and
+    in particular never at the exact moment a gesture trigger fires. This call itself may
+    therefore take several seconds; that's the intended trade — paid once, here, not live.
     """
     global _pipeline_singleton
     config: FollowMeOrchestratorConfig = load_config(thresholds_config_path)
-    _pipeline_singleton = FollowMeOrchestratorPipeline(config, gesture_method, face_registry_dir)
+    _pipeline_singleton = FollowMeOrchestratorPipeline(
+        config, gesture_method, face_registry_dir, thresholds_config_path,
+    )
 
 
 def _get_pipeline() -> FollowMeOrchestratorPipeline:
@@ -104,13 +112,45 @@ def draw_debug(frame: np.ndarray) -> None:
     """
     Draws EVERY phase's own debug overlay onto `frame` — face_identity's bbox+match,
     human_detection_roi's ROI+person bbox, the active gesture method's keypoints/skeleton/state,
-    target_tracking's bbox+center-line+reverify readout, and target_recovery's search
-    status+reacquired bbox — by calling each composed module's OWN draw_debug(), not
-    re-implementing any of their drawing logic. This is the sanctioned use of this module's
-    isolation exception: composing PUBLIC draw_debug() calls is no different from composing
-    evaluate()/step() calls.
+    and autocar_adapter's tracked bbox+center-line+state readout — by calling each composed
+    module's OWN draw_debug(), not re-implementing any of their drawing logic. This is the
+    sanctioned use of this module's isolation exception: composing PUBLIC draw_debug() calls is
+    no different from composing evaluate()/step() calls.
 
     Call this AFTER step(), with the SAME frame, in the same loop iteration — it draws from
     whichever phase(s) that step() call actually ran; it does not re-run any inference itself.
     """
     _get_pipeline().draw_debug(frame)
+
+
+_ARROW_COLOR = (0, 255, 255)
+_ARROW_LENGTH_PX = 100
+_ARROW_ORIGIN_MARGIN_PX = 30
+
+
+def draw_steering_arrow(frame: np.ndarray, command: FollowMeCommand) -> None:
+    """
+    Draws an arrow from bottom-center of `frame` showing the CALCULATED steering direction —
+    the same `steering_angle_degrees` the robot is actually being commanded with this frame, not
+    a re-derivation of it. 0 degrees points straight up (ahead); positive angles tilt right,
+    negative left — the exact sign convention SteeringController.update() already uses
+    (`error_degrees = horizontal_offset * (fov_degrees / 2)`, positive when the tracked person's
+    center is to the right of frame-center — see autocar_adapter.py's horizontal_offset and
+    steering_controller.py's docstring).
+
+    No-ops (draws nothing) when should_move is False or steering_angle_degrees is None — i.e.
+    whenever the robot isn't actually being told to move, there is no "calculated direction" to
+    show. Call this AFTER step(), with the SAME frame, same as draw_debug() above.
+    """
+    if not command.should_move or command.steering_angle_degrees is None:
+        return
+    frame_h, frame_w = frame.shape[:2]
+    origin = (frame_w // 2, frame_h - _ARROW_ORIGIN_MARGIN_PX)
+    angle_rad = math.radians(command.steering_angle_degrees)
+    tip = (
+        int(origin[0] + _ARROW_LENGTH_PX * math.sin(angle_rad)),
+        int(origin[1] - _ARROW_LENGTH_PX * math.cos(angle_rad)),
+    )
+    cv2.arrowedLine(frame, origin, tip, _ARROW_COLOR, 3, tipLength=0.3)
+    cv2.putText(frame, f"{command.steering_angle_degrees:+.1f} deg", (origin[0] + 12, origin[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, _ARROW_COLOR, 2)

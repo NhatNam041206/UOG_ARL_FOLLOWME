@@ -30,6 +30,17 @@ class GestureMethodAdapter:
         else:
             raise ValueError(f"Unknown gesture method '{method_name}'")
 
+    def warmup(self, thresholds_config_path: str = "config/thresholds.yaml") -> None:
+        """Eagerly constructs the underlying model NOW rather than on the first real evaluate()
+        call (confirmed with the user — startup should absorb model-load latency, not the live
+        pipeline). "condition" is already fully constructed in __init__ above (WaveFacingGateModule
+        loads its MoveNet instance eagerly); hand_keypoint/trajectory_verifier instead hold a
+        reference to their own INTERFACE MODULE (self._module = gi above), which lazily builds its
+        own pipeline singleton on first configure()/evaluate() — calling configure() here forces
+        that construction immediately."""
+        if self.method_name in ("hand_keypoint", "trajectory_verifier"):
+            self._module.configure(thresholds_config_path)
+
     def evaluate(self, track_id: int, crop, timestamp: float,
                  person_bbox_full_frame: Optional[Tuple[int, int, int, int]] = None) -> Tuple[bool, str]:
         """Returns (is_waving, waving_state). `person_bbox_full_frame` is only used by

@@ -1,32 +1,35 @@
 """
 Per-frame orchestrator sequencing (plans/08 §1): pre-trigger (face_identity ->
-human_detection_roi -> gesture method -> trigger check) then, once a target_tracking episode is
-active, post-trigger (target_tracking -> SteeringController, or target_recovery on LOST). Not
-part of the public contract — external callers use interface.py only.
+human_detection_roi -> gesture method -> trigger check) then, once a tracking episode is active,
+post-trigger (autocar_adapter -> SteeringController; autocar_adapter's own TargetLock folds
+tracking-while-present and recovery-on-loss into one state machine, so there is no separate
+recovery step here). Not part of the public contract — external callers use interface.py only.
 
 Composes across module boundaries — face_identity, human_detection_roi, the gesture methods,
-target_tracking, target_recovery — which is normally forbidden by this project's own-instance
-isolation convention (docs/architecture.md rule #2/#3: only main.py imports across module
-boundaries). This module is the ONE deliberate, documented exception (plans/08 §0.3): it exists
-specifically to be the reusable, importable version of what main.py's face_first pipeline
-currently does ad hoc, plus the new post-trigger tracking/recovery/steering sequencing main.py
-does not do at all. It still never reaches into any composed module's PRIVATE implementation —
-only public interface.py contracts, exactly as main.py already does today.
+autocar_adapter (a sibling file in this same package, not another module) — which is normally
+forbidden by this project's own-instance isolation convention (docs/architecture.md rule #2/#3:
+only main.py imports across module boundaries). This module is the ONE deliberate, documented
+exception (plans/08 §0.3): it exists specifically to be the reusable, importable version of what
+main.py's face_first pipeline currently does ad hoc, plus the new post-trigger tracking/steering
+sequencing main.py does not do at all. It still never reaches into any composed module's PRIVATE
+implementation — only public interface.py contracts, exactly as main.py already does today.
 
-Manages a SINGLE active follow-me episode, mirroring target_tracking/target_recovery's own
-single-episode design — this module can only ever follow one person at a time by construction
-(both of those modules are themselves single-episode module-level singletons).
+Manages a SINGLE active follow-me episode, mirroring autocar_adapter's own single-episode design
+— this module can only ever follow one person at a time by construction (autocar_adapter is
+itself a single-episode module-level singleton).
 """
 import logging
 from typing import List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
+import modules.face_identity.interface as face_identity_interface
+import modules.human_detection_roi.interface as human_detection_roi_interface
 from modules.face_identity.interface import FaceRegistry, evaluate as evaluate_face
 from modules.human_detection_roi.interface import evaluate as evaluate_person
-from modules.target_recovery.interface import start as recovery_start, update as recovery_update
-from modules.target_tracking.interface import start as tracking_start, update as tracking_update, reset as tracking_reset
 
+from . import autocar_adapter
+from .autocar_adapter import start as tracking_start, update as tracking_update
 from .config import FollowMeOrchestratorConfig
 from .gesture_adapter import GestureMethodAdapter
 from .steering_controller import SteeringController
@@ -47,7 +50,8 @@ class PipelineResult(NamedTuple):
 
 class FollowMeOrchestratorPipeline:
     def __init__(self, config: FollowMeOrchestratorConfig, gesture_method: str,
-                 face_registry_dir: str = "modules/face_identity/registry_data"):
+                 face_registry_dir: str = "modules/face_identity/registry_data",
+                 thresholds_config_path: str = "config/thresholds.yaml"):
         self.config = config
         self.registry = FaceRegistry(face_registry_dir)
         self.gesture_adapter = GestureMethodAdapter(gesture_method)
@@ -55,13 +59,26 @@ class FollowMeOrchestratorPipeline:
             config.kp, config.ki, config.kd, config.max_steering_angle_degrees, config.fov_degrees,
         )
 
+        # Eagerly load EVERY model this pipeline will need, right now, rather than lazily on
+        # first use (confirmed with the user — a cold-start model load should be absorbed here,
+        # at startup, not show up as a live stutter on the first real frame or — worse — at the
+        # exact moment a gesture trigger fires, which is autocar_adapter.start()'s old behavior).
+        # face_identity/human_detection_roi/gesture methods already build their models inside
+        # configure()/their own __init__; autocar_adapter.warmup() additionally runs one
+        # throwaway inference through the YOLO-pose detector and OSNet embedder, since a
+        # backend's first-inference cost isn't always fully paid by construction alone.
+        face_identity_interface.configure(thresholds_config_path)
+        human_detection_roi_interface.configure(thresholds_config_path)
+        self.gesture_adapter.warmup(thresholds_config_path)
+        autocar_adapter.warmup(thresholds_config_path)
+
         self._tracking_active = False
-        self._recovery_active = False
         self._target_person_name: Optional[str] = None
 
         # Debug/visualization convenience only — the current tracked/reacquired bbox, from
-        # target_tracking's/target_recovery's own PUBLIC result fields (never a private reach-in
-        # into either module). FollowMeCommand itself has no bbox field per plans/08 §0.3's
+        # autocar_adapter's own PUBLIC result fields (never a private reach-in from HERE; the one
+        # deliberate reach into TargetLock's own internals happens inside autocar_adapter.py
+        # itself, documented there). FollowMeCommand itself has no bbox field per plans/08 §0.3's
         # literal contract; visualize_followme_orchestrator.py reads this off its own private
         # pipeline instance instead, same "reach into MY OWN package's internals" pattern every
         # other module's visualize_*.py already uses.
@@ -70,12 +87,11 @@ class FollowMeOrchestratorPipeline:
         # Per-frame debug/overlay state — the raw result objects from whichever phase(s) ran
         # THIS step() call, so draw_debug() below can composite each phase's OWN draw_debug()
         # without re-running any inference. Reset at the top of whichever _step_*() branch runs;
-        # not part of the tracking episode's own state (episode state lives in target_tracking/
-        # target_recovery's own modules, not here).
+        # not part of the tracking episode's own state (episode state lives inside
+        # autocar_adapter's own engine, not here).
         self._debug_pretrigger: List[Tuple[object, object]] = []  # (FaceIdentityResult, HumanDetectionResult) per registered face
         self._debug_gesture_bbox: Optional[BboxXYWH] = None       # bbox of the last person the gesture method evaluated
         self._debug_tracking_result: Optional[object] = None       # TrackingResult, when post-trigger ran
-        self._debug_recovery_result: Optional[object] = None       # RecoveryResult, when a search episode ran
 
         missing = config.missing_keys()
         if missing:
@@ -95,7 +111,7 @@ class FollowMeOrchestratorPipeline:
         """Mirrors main.py's run_face_first_pipeline() exactly (plans/08 §0.5 audit item #1) —
         face_identity -> human_detection_roi -> gesture method, per registered face in frame.
         The FIRST person whose gesture reaches GREEN this frame becomes the locked target
-        (only one follow-me episode can ever be active, per target_tracking's own design) —
+        (only one follow-me episode can ever be active, per autocar_adapter's own design) —
         any other registered people evaluated this same frame are simply not started."""
         frame_h, frame_w = frame.shape[:2]
         face_results = [r for r in evaluate_face(frame, self.registry) if r.is_registered_match]
@@ -103,7 +119,6 @@ class FollowMeOrchestratorPipeline:
         self._debug_pretrigger = []
         self._debug_gesture_bbox = None
         self._debug_tracking_result = None
-        self._debug_recovery_result = None
 
         # No per-frame release_track() for tracks not seen this frame (deliberately absent, not
         # just relaxed): a person briefly not matched/found (occlusion, one missed detection) is
@@ -136,9 +151,8 @@ class FollowMeOrchestratorPipeline:
             self._debug_gesture_bbox = (px, py, pw, ph)
 
             if is_waving:
-                tracking_start((px, py, pw, ph), frame, timestamp)
+                tracking_start(face.matched_person_name, (px, py, pw, ph), frame, timestamp)
                 self._tracking_active = True
-                self._recovery_active = False
                 self._target_person_name = face.matched_person_name
                 self.last_person_bbox = (px, py, pw, ph)
                 self.steering.reset()
@@ -147,15 +161,22 @@ class FollowMeOrchestratorPipeline:
         return PipelineResult(False, None, "WAITING_FOR_TRIGGER")
 
     def _step_post_trigger(self, frame: np.ndarray, timestamp: float) -> PipelineResult:
+        """autocar_adapter's TargetLock folds tracking AND recovery into one state machine (see
+        that module's docstring) — TRACKING while the lock holds, SEARCHING while it tries to
+        reclaim a lost lock (its own ACQUIRING, running every update() call, doubling as
+        recovery), LOST once recovery_timeout_seconds gives up. No separate recovery module/call
+        site exists anymore."""
         self._debug_pretrigger = []
         self._debug_gesture_bbox = None
-        self._debug_recovery_result = None
 
         result = tracking_update(frame, timestamp)
         self._debug_tracking_result = result
 
-        if result.state in ("RECORDING", "TRACKING"):
-            self._recovery_active = False
+        if result.state == "TRACKING":
+            if result.just_reacquired:
+                # Reclaimed mid-episode after a loss — clear any stale PID windup from the gap,
+                # same as target_recovery's old REACQUIRED handling.
+                self.steering.reset()
             if result.person_bbox is not None:
                 self.last_person_bbox = result.person_bbox
             if result.horizontal_offset is not None and self.steering.is_calibrated():
@@ -166,46 +187,26 @@ class FollowMeOrchestratorPipeline:
             # False even though the target is still genuinely being tracked.
             return PipelineResult(False, None, f"{result.state}_STEERING_UNCALIBRATED")
 
-        if result.state == "LOST":
-            if not self._recovery_active:
-                recovery_start(result.reference_set, self._target_person_name, timestamp)
-                self._recovery_active = True
-
-            recovery_result = recovery_update(frame, self.registry, timestamp)
-            self._debug_recovery_result = recovery_result
-
-            if recovery_result.status == "REACQUIRED":
-                tracking_reset(recovery_result.reacquired_person_bbox, frame, timestamp)
-                self._recovery_active = False
-                self.steering.reset()
-                self.last_person_bbox = recovery_result.reacquired_person_bbox
-                # should_move=True per spec ("resume steering next cycle") — no fresh
-                # horizontal_offset exists yet THIS exact frame (RECORDING just re-started via
-                # tracking_reset() above), so angle is held at 0.0 (straight ahead) for this one
-                # transitional frame only; the next step() call reports a real PID output.
-                return PipelineResult(True, 0.0, "REACQUIRED_RESUMING")
-
-            if recovery_result.status == "TIMEOUT":
-                # Auto-resume watching for a new trigger (confirmed with the user): flipping
-                # _tracking_active back to False here means the VERY NEXT step() call falls
-                # through to _step_pre_trigger() again on its own — no separate reset() call
-                # needed, the robot just sits stopped until someone triggers a fresh episode.
-                self._tracking_active = False
-                self._recovery_active = False
-                self._target_person_name = None
-                self.last_person_bbox = None
-                return PipelineResult(False, None, "STOPPED")
-
+        if result.state == "SEARCHING":
             return PipelineResult(False, None, "RECOVERING")
 
-        # Defensive fallback — target_tracking's state is always one of the three handled above.
+        if result.state == "LOST":
+            # Auto-resume watching for a new trigger (confirmed with the user, same convention as
+            # before): flipping _tracking_active back to False here means the VERY NEXT step()
+            # call falls through to _step_pre_trigger() again on its own.
+            self._tracking_active = False
+            self._target_person_name = None
+            self.last_person_bbox = None
+            return PipelineResult(False, None, "STOPPED")
+
+        # Defensive fallback — autocar_adapter's state is always one of the three handled above.
         return PipelineResult(False, None, "UNKNOWN_TRACKING_STATE")
 
     def draw_debug(self, frame: np.ndarray) -> None:
         """
         Draws EVERY phase's own debug overlay onto `frame`, by calling each composed module's
         OWN draw_debug() — face_identity, human_detection_roi, the active gesture method,
-        target_tracking, target_recovery — rather than re-implementing any of their drawing
+        autocar_adapter's TrackingResult — rather than re-implementing any of their drawing
         logic a second time. This is the sanctioned use of this module's isolation exception
         (see interface.py's docstring): composing PUBLIC draw_debug() calls is no different from
         composing evaluate()/step() calls. Must be called AFTER step(), with the SAME frame, in
@@ -224,6 +225,3 @@ class FollowMeOrchestratorPipeline:
 
         if self._debug_tracking_result is not None:
             self._debug_tracking_result.draw_debug(frame)
-
-        if self._debug_recovery_result is not None:
-            self._debug_recovery_result.draw_debug(frame)

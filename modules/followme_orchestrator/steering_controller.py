@@ -38,13 +38,15 @@ class SteeringController:
 
     def update(self, horizontal_offset: float, timestamp: float) -> float:
         """
-        `horizontal_offset`: -1.0..+1.0 normalized error signal from modules.target_tracking.
+        `horizontal_offset`: -1.0..+1.0 normalized error signal from autocar_adapter (a sibling
+        file in this same package — see pipeline.py).
         `timestamp`: real wall-clock time (same clock/units as everywhere else in this pipeline)
         — dt is computed internally as (timestamp - self._last_timestamp), NOT assumed.
 
         Converts horizontal_offset to a true angle via `fov_degrees` — this is deliberately WHERE
-        that conversion happens, not inside modules.target_tracking, per that module's own
-        explicit architecture boundary (plans/06 §4.2) — BEFORE running PID, so kp/ki/kd are
+        that conversion happens, not inside the tracking engine itself, per the original
+        target_tracking module's explicit architecture boundary (plans/06 §4.2), still honored
+        here — BEFORE running PID, so kp/ki/kd are
         tuned against real degrees of error, not an abstract -1..+1 unit.
 
         Returns a signed angle in degrees, clamped to +/- max_steering_angle_degrees (an

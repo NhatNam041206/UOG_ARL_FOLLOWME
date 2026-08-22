@@ -20,17 +20,15 @@ import time
 import cv2
 
 from modules.followme_orchestrator.config import load_config
+from modules.followme_orchestrator.interface import draw_steering_arrow
 from modules.followme_orchestrator.pipeline import FollowMeOrchestratorPipeline
 
 _STATE_COLOR = {
     "WAITING_FOR_TRIGGER": (180, 180, 180),
     "TRACKING_STARTED": (0, 220, 255),
-    "RECORDING": (0, 220, 255),
     "TRACKING": (0, 200, 0),
-    "RECORDING_STEERING_UNCALIBRATED": (0, 160, 255),
     "TRACKING_STEERING_UNCALIBRATED": (0, 160, 255),
     "RECOVERING": (0, 140, 255),
-    "REACQUIRED_RESUMING": (0, 200, 0),
     "STOPPED": (0, 0, 255),
 }
 
@@ -67,7 +65,7 @@ def main() -> int:
     # Own pipeline instance (not the module-level singleton behind interface.step()) so this
     # debug tool can read last_person_bbox for drawing — a reach-in that's fine here since this
     # file lives inside the module's own package (same pattern every other visualize_*.py uses).
-    pipeline = FollowMeOrchestratorPipeline(config, args.gesture_method, args.face_registry_dir)
+    pipeline = FollowMeOrchestratorPipeline(config, args.gesture_method, args.face_registry_dir, args.config)
 
     frame_idx = 0
     try:
@@ -92,6 +90,10 @@ def main() -> int:
             label2 = f"should_move={result.should_move}  steering={angle_str}"
             cv2.putText(frame, label1, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             cv2.putText(frame, label2, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # `result` (PipelineResult) has the same should_move/steering_angle_degrees fields
+            # draw_steering_arrow() expects from FollowMeCommand — same reach-in-is-fine pattern
+            # this file already uses for pipeline.last_person_bbox above.
+            draw_steering_arrow(frame, result)
 
             print(
                 f"frame={frame_idx:06d} debug_state={result.debug_state:28s} "
