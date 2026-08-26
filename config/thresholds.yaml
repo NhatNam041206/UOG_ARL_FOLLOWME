@@ -256,15 +256,24 @@ target_recovery:
   search_timeout_seconds: null           # TODO: calibrate — spec suggests ~1-2 minutes as a starting range
   # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance for Path B's whole-frame detection
 
-# Vendored tracking+recovery backbone (modules/autocar — vinhh9608-byte/Autocar, commit 27ee33a),
-# slated to replace target_tracking + target_recovery above once confirmed working (module stays
-# named "autocar" until then, renaming to target_tracking afterward). Their engine (detector/,
-# tracker/, identity/, config.py) is kept UNMODIFIED — modules/autocar/ has nothing added to it
-# either; every value below is only ever read by the adapter code in
+# Vendored tracking+recovery backbone (modules/autocar — vinhh9608-byte/Autocar, commit 8037862,
+# re-vendored from 27ee33a — see this section's own comments below for what changed), slated to
+# replace target_tracking + target_recovery above once confirmed working (module stays named
+# "autocar" until then, renaming to target_tracking afterward). Their engine (detector/, tracker/,
+# identity/, config.py) is kept UNMODIFIED — modules/autocar/ has nothing added to it either;
+# every value below is only ever read by the adapter code in
 # modules/followme_orchestrator/autocar_adapter.py (+ autocar_bootstrap.py), which lives outside
 # modules/autocar/ specifically so that directory stays a pure, untouched mirror of the clone,
 # and passes these into their classes' own constructor overrides — their vendored config.py is
 # never edited.
+#
+# What changed in 8037862: FRONT-face matching no longer uses OSNet on a keypoint-guessed head
+# rectangle — it now runs a REAL face detector (YuNet) + face-recognition embedding (SFace) on
+# that same head-region crop (identity/face_recognizer.py), replacing reid_similarity_threshold
+# with face_similarity_threshold. OSNet is now used ONLY for the BACK-of-head case (no face
+# detected = facing away), under its own back_head_similarity_threshold. Their old
+# reid_face_min_keypoint_conf key is GONE — "is a face visible" is now answered by running the
+# real detector, not guessing from keypoint confidence.
 #
 # Detector/tracker/re-id values are carried over as-is from their own config.py — those are
 # their own considered starting points, not values we invented, so treated as STARTING GUESSES
@@ -288,12 +297,19 @@ autocar:
   track_buffer: 30               # STARTING GUESS, carried from their config.py TRACK_BUFFER
 
   # --- Re-ID / TargetLock (their identity/target_lock.py) ---
-  reid_similarity_threshold: 0.75        # STARTING GUESS, carried from their config.py REID_SIMILARITY_THRESHOLD — ESPECIALLY uncalibrated, same OSNet accuracy caveats as appearance_verifier above
-  reid_face_min_keypoint_conf: 0.8       # STARTING GUESS, carried from their config.py REID_FACE_MIN_KEYPOINT_CONF
-  reid_head_split_fallback_fraction: 0.35  # STARTING GUESS, carried from their config.py REID_HEAD_SPLIT_FALLBACK_FRACTION
+  face_similarity_threshold: 0.363       # opencv_zoo's OWN documented "same person" cutoff for this exact SFace model, carried from their config.py FACE_SIMILARITY_THRESHOLD — a real published starting point, but still worth recalibrating against this project's own footage
+  back_head_similarity_threshold: 0.7    # STARTING GUESS, carried from their config.py REID_BACK_HEAD_SIMILARITY_THRESHOLD — ESPECIALLY uncalibrated, same OSNet accuracy caveats as appearance_verifier above (this is now the ONLY case OSNet is used for)
+  # reid_head_split_fallback_fraction (0.35) / reid_head_crop_width_fraction (0.7): informational
+  # only — carried from their config.py, but NOT overridable from here. Both are read by
+  # identity/face_region.py directly off the vendored config module's own globals, not passed
+  # through TargetLock's constructor, so there is no seam for our adapter to override them
+  # without either editing their file (not allowed) or monkey-patching their module's attributes
+  # at runtime (not done — treat as a known gap if these ever need calibrating).
   reid_acquire_rounds: 3                 # STARTING GUESS, carried from their config.py REID_ACQUIRE_ROUNDS — only used on initial force-lock IoU fallback, not the normal trigger path
   reid_acquire_cooldown_sec: 0.5         # STARTING GUESS, carried from their config.py REID_ACQUIRE_COOLDOWN_SEC
-  # reid_model_path: "modules/autocar/models/osnet_x1_0_msmt17.onnx"  # optional override — file must exist; see modules/autocar/README.md
+  # reid_model_path: "modules/autocar/models/osnet_x1_0_msmt17.onnx"          # optional override — file must exist; see modules/autocar/models/README.md
+  # face_detector_model_path: "modules/autocar/models/face_detection_yunet_2023mar.onnx"      # optional override
+  # face_recognizer_model_path: "modules/autocar/models/face_recognition_sface_2021dec.onnx"  # optional override
 
   # --- Ours, not theirs (closes the "search forever" gap noted above) ---
   recovery_timeout_seconds: null  # TODO: calibrate — spec-equivalent to target_recovery.search_timeout_seconds above

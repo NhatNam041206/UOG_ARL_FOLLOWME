@@ -3,15 +3,18 @@ Enroll ONE person's appearance for main.py --target re-identification.
 
 Two phases, back to back:
   1. FRONT - stand inside the on-screen ROI box, press SPACE to start a countdown, then hold
-     still, facing the camera (the face must be visible - see identity/face_region.py), while it
-     collects samples over config.ENROLL_DURATION_SEC seconds.
+     still, facing the camera, while it collects samples over config.ENROLL_DURATION_SEC seconds.
+     Each sample requires a REAL face to be detected (identity/face_recognizer.py's YuNet) inside
+     the head-region crop - not just a pose-keypoint guess.
   2. BACK - turn around, back to the camera, press SPACE to start a second countdown, then hold
-     still while it collects back-of-head samples over the same duration. This lets main.py
-     --target still recognize the person while they're walking away with their back to the
-     camera, instead of only from the front.
+     still while it collects back-of-head samples over the same duration (accepted only when NO
+     face is detected, confirming you're actually turned away). This lets main.py --target still
+     recognize the person while they're walking away with their back to the camera, instead of
+     only from the front.
 
-Saves averaged front-head, back-of-head, and lower-body OSNet embeddings + aspect ratio to
-models/enrolled_<name>.npz.
+Saves an SFace front-face embedding, an OSNet back-of-head embedding, and (unused by current
+matching, kept for the profile format's sake) legacy OSNet head/lower embeddings + aspect ratio,
+to models/enrolled_<name>.npz.
 
     python scripts/enroll_person.py alice --source 0
 """
@@ -28,6 +31,7 @@ import numpy as np
 import config
 from detector.yolov8_pose_torch import YOLOv8PoseTorch
 from identity import face_region, pose_gate
+from identity.face_recognizer import FaceRecognizer
 from identity.osnet_embedder import OSNetEmbedder
 from identity.target_profile import save_target_profile, sanitize_person_name
 from utils.video_source import VideoSource
@@ -62,9 +66,14 @@ def main():
     name = sanitize_person_name(args.name)
     source = int(args.source) if args.source.isdigit() else args.source
 
-    print(f"Loading detector + OSNet embedder (device={args.device})...")
+    print(f"Loading detector + face recognizer + OSNet embedder (device={args.device})...")
     detector = YOLOv8PoseTorch(device=args.device)
-    embedder = OSNetEmbedder(config.REID_MODEL_PATH, device=args.device)
+    face_recognizer = FaceRecognizer(
+        config.FACE_DETECTOR_MODEL_PATH, config.FACE_RECOGNIZER_MODEL_PATH,
+        score_threshold=config.FACE_DETECT_SCORE_THRESHOLD,
+        nms_threshold=config.FACE_DETECT_NMS_THRESHOLD, top_k=config.FACE_DETECT_TOP_K,
+    )
+    osnet_embedder = OSNetEmbedder(config.REID_MODEL_PATH, device=args.device)
     video = VideoSource(source, width=args.width, height=args.height)
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
@@ -78,8 +87,9 @@ def main():
     frame_idx = 0
     last_sample_frame_idx = -config.ENROLL_SAMPLE_INTERVAL_FRAMES
 
-    head_embeddings, lower_embeddings, aspect_ratios = [], [], []
-    back_head_embeddings = []
+    face_embeddings = []  # SFace, front - what identity/target_lock.py actually matches on
+    back_head_embeddings = []  # OSNet, back-of-head - matched when no face is visible
+    head_embeddings, lower_embeddings, aspect_ratios = [], [], []  # legacy, unused, kept for format
     cancelled = False
 
     try:
@@ -112,7 +122,7 @@ def main():
             elif state == "collecting_front":
                 elapsed = time.time() - collect_start
                 cv2.putText(display, f"Collecting FRONT... {elapsed:.1f}/{config.ENROLL_DURATION_SEC}s "
-                                      f"({len(head_embeddings)} samples)", (20, 30),
+                                      f"({len(face_embeddings)} samples)", (20, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
                 if frame_idx - last_sample_frame_idx >= config.ENROLL_SAMPLE_INTERVAL_FRAMES:
@@ -122,15 +132,17 @@ def main():
 
                     if len(roi_dets) == 1:
                         det = roi_dets[0]
-                        if not face_region.is_face_visible(det.keypoints):
-                            print(f"  skip frame {frame_idx}: face not visible - look at the camera")
+                        head_crop, lower_crop = face_region.crop_head_lower(
+                            frame, det.bbox, det.keypoints, frame_w, frame_h
+                        )
+                        face_row = face_recognizer.detect_best_face(head_crop) if head_crop.size > 0 else None
+                        if face_row is None:
+                            print(f"  skip frame {frame_idx}: no face detected - look at the camera")
                         else:
-                            head_crop, lower_crop = face_region.crop_head_lower(
-                                frame, det.bbox, det.keypoints, frame_w, frame_h
-                            )
-                            if head_crop.size > 0 and lower_crop.size > 0:
-                                head_embeddings.append(embedder.extract(head_crop))
-                                lower_embeddings.append(embedder.extract(lower_crop))
+                            face_embeddings.append(face_recognizer.extract(head_crop, face_row))
+                            if lower_crop.size > 0:
+                                head_embeddings.append(osnet_embedder.extract(head_crop))
+                                lower_embeddings.append(osnet_embedder.extract(lower_crop))
                                 aspect_ratios.append(pose_gate.aspect_ratio_from_bbox(det.bbox))
                     else:
                         print(f"  skip frame {frame_idx}: {len(roi_dets)} people in ROI (need exactly 1)")
@@ -153,14 +165,14 @@ def main():
 
                     if len(roi_dets) == 1:
                         det = roi_dets[0]
-                        if face_region.is_face_visible(det.keypoints):
-                            print(f"  skip frame {frame_idx}: face visible - turn all the way around")
-                        else:
-                            head_crop, _ = face_region.crop_head_lower(
-                                frame, det.bbox, det.keypoints, frame_w, frame_h
-                            )
-                            if head_crop.size > 0:
-                                back_head_embeddings.append(embedder.extract(head_crop))
+                        head_crop, _ = face_region.crop_head_lower(
+                            frame, det.bbox, det.keypoints, frame_w, frame_h
+                        )
+                        face_row = face_recognizer.detect_best_face(head_crop) if head_crop.size > 0 else None
+                        if face_row is not None:
+                            print(f"  skip frame {frame_idx}: face detected - turn all the way around")
+                        elif head_crop.size > 0:
+                            back_head_embeddings.append(osnet_embedder.extract(head_crop))
                     else:
                         print(f"  skip frame {frame_idx}: {len(roi_dets)} people in ROI (need exactly 1)")
 
@@ -188,8 +200,8 @@ def main():
         print("Cancelled.")
         sys.exit(1)
 
-    if len(head_embeddings) < config.ENROLL_MIN_SAMPLES:
-        print(f"FAILED: only {len(head_embeddings)} valid FRONT samples collected "
+    if len(face_embeddings) < config.ENROLL_MIN_SAMPLES:
+        print(f"FAILED: only {len(face_embeddings)} valid FRONT samples collected "
               f"(need >= {config.ENROLL_MIN_SAMPLES}). Try again - better lighting, look at the "
               f"camera, or make sure only 1 person is inside the ROI box while collecting.")
         sys.exit(1)
@@ -197,7 +209,7 @@ def main():
     if len(back_head_embeddings) < config.ENROLL_MIN_SAMPLES:
         print(f"FAILED: only {len(back_head_embeddings)} valid BACK samples collected "
               f"(need >= {config.ENROLL_MIN_SAMPLES}). Try again - make sure you're fully turned "
-              f"around (face not visible) and only 1 person is inside the ROI box while collecting.")
+              f"around (no face detected) and only 1 person is inside the ROI box while collecting.")
         sys.exit(1)
 
     def _composite(embeddings):
@@ -205,16 +217,18 @@ def main():
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 1e-6 else vec
 
-    head_composite = _composite(head_embeddings)
+    face_composite = _composite(face_embeddings)
     back_head_composite = _composite(back_head_embeddings)
+    head_composite = _composite(head_embeddings)
     lower_composite = _composite(lower_embeddings)
     median_aspect_ratio = float(np.median(aspect_ratios))
 
     out_path = f"models/enrolled_{name}.npz"
     save_target_profile(out_path, head_composite, lower_composite, median_aspect_ratio,
-                         len(head_embeddings), back_head_embedding=back_head_composite)
-    print(f"Saved {len(head_embeddings)} front + {len(back_head_embeddings)} back samples -> "
-          f"'{out_path}' (aspect_ratio={median_aspect_ratio:.3f})")
+                         len(face_embeddings), back_head_embedding=back_head_composite,
+                         face_embedding=face_composite)
+    print(f"Saved {len(face_embeddings)} front + {len(back_head_embeddings)} back samples -> "
+          f"'{out_path}'")
     print(f"Run: python main.py --source 0 --target {out_path}")
 
 

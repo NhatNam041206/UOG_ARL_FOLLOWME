@@ -38,9 +38,10 @@ def draw_tracks(frame: np.ndarray, tracks: List[TrackedObject], target_id: Optio
         target_confidence (identity.TargetLock.last_verify_score - the most recent real check's
         score) is shown as a percentage; falls back to the detection score if not given.
       - target_id is None (still searching): every candidate is dimmed (red, thin).
-        candidate_scores (identity.TargetLock.candidate_scores - each track_id's most recent
-        face-only similarity-to-target sample) supplies the number; a track with no sample yet
-        (face never seen) shows "no face" instead of a number.
+        candidate_scores (identity.TargetLock.candidate_scores - each track_id's RUNNING AVERAGE
+        similarity-to-target across this acquisition cycle's rounds so far, the same average that
+        decides who locks in) supplies the number; a track with no sample yet shows "no face"
+        instead of a number.
     """
     if not target_mode:
         for t in tracks:

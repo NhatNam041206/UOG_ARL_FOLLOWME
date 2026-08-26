@@ -33,6 +33,10 @@ data/*.avi
 # training data) are intentionally NOT ignored - they're your actual work
 # and small enough to version normally.
 
+# Session-only back-of-head dataset built live by identity/session_back_dataset.py while
+# main.py --target runs - not enrollment data, not meant to be versioned.
+temp_dataset/
+
 # OS/editor cruft
 .DS_Store
 Thumbs.db

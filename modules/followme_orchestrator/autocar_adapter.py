@@ -50,10 +50,20 @@ identically for modules.target_tracking/human_detection):
   - Requires a pre-enrolled profile (modules/autocar/models/enrolled_<name>.npz) for whichever
     person is being followed — unlike the old target_tracking, which captured its reference on
     the fly at trigger time. See the project's registration-tool plan for how these get built.
-  - Requires modules/autocar/models/osnet_x1_0_msmt17.onnx to exist — not part of the vendored
-    repo (their own .gitignore excludes it); see modules/autocar/models/README.md.
+  - Requires modules/autocar/models/osnet_x1_0_msmt17.onnx (BACK-of-head only, as of commit
+    8037862 — see below) AND face_detection_yunet_2023mar.onnx AND
+    face_recognition_sface_2021dec.onnx to exist — none are part of the vendored repo (their own
+    .gitignore excludes all model weights); see modules/autocar/models/README.md.
   - No PID or steering logic here — same architectural boundary target_tracking always had;
     SteeringController (steering_controller.py, this same package) still owns that.
+
+Re-vendored from commit 27ee33a to 8037862: FRONT-face matching no longer runs OSNet on a
+keypoint-guessed head rectangle — it now runs a REAL face detector + recognizer (YuNet + SFace,
+identity/face_recognizer.py) on that same head-region crop. OSNet is now used ONLY for the
+BACK-of-head case (no face detected in the crop = facing away). This changed TargetLock's
+constructor signature (embedder= -> osnet_embedder=, + a new face_recognizer= param,
+similarity_threshold= split into face_similarity_threshold=/back_head_similarity_threshold=) —
+see _get_face_recognizer() and start() below.
 """
 import os
 from dataclasses import dataclass
@@ -71,6 +81,7 @@ autocar_bootstrap.ensure_on_path()
 # namespace — see autocar_bootstrap.py's docstring for why that's safe here.
 from detector.yolov8_pose_torch import YOLOv8PoseTorch  # noqa: E402
 from tracker.byte_tracker import BYTETracker  # noqa: E402
+from identity.face_recognizer import FaceRecognizer  # noqa: E402
 from identity.osnet_embedder import OSNetEmbedder  # noqa: E402
 from identity.target_lock import TargetLock  # noqa: E402
 from identity.target_profile import sanitize_person_name  # noqa: E402
@@ -99,10 +110,13 @@ class _AdapterConfig:
     low_match_thresh: float = 0.5
     track_buffer: int = 30
 
-    reid_similarity_threshold: float = 0.75
+    face_similarity_threshold: float = 0.363
+    back_head_similarity_threshold: float = 0.7
     reid_acquire_rounds: int = 3
     reid_acquire_cooldown_sec: float = 0.5
     reid_model_path: Optional[str] = None  # None -> f"{_MODELS_DIR}/osnet_x1_0_msmt17.onnx"
+    face_detector_model_path: Optional[str] = None  # None -> f"{_MODELS_DIR}/face_detection_yunet_2023mar.onnx"
+    face_recognizer_model_path: Optional[str] = None  # None -> f"{_MODELS_DIR}/face_recognition_sface_2021dec.onnx"
 
     recovery_timeout_seconds: Optional[float] = None  # None = never times out (see module docstring)
     device: str = "cpu"
@@ -119,8 +133,10 @@ def _load_config(thresholds_path: str) -> _AdapterConfig:
     for field_name in (
         "detect_conf", "detect_imgsz", "pose_model_path", "track_high_thresh", "track_low_thresh",
         "new_track_thresh", "match_thresh", "low_match_thresh", "track_buffer",
-        "reid_similarity_threshold", "reid_acquire_rounds", "reid_acquire_cooldown_sec",
-        "reid_model_path", "recovery_timeout_seconds", "device",
+        "face_similarity_threshold", "back_head_similarity_threshold",
+        "reid_acquire_rounds", "reid_acquire_cooldown_sec",
+        "reid_model_path", "face_detector_model_path", "face_recognizer_model_path",
+        "recovery_timeout_seconds", "device",
     ):
         if field_name in section and section[field_name] is not None:
             kwargs[field_name] = section[field_name]
@@ -181,6 +197,7 @@ class _AutocarEngine:
         self.config = config
         self._detector: Optional[YOLOv8PoseTorch] = None
         self._embedder: Optional[OSNetEmbedder] = None
+        self._face_recognizer: Optional[FaceRecognizer] = None
         self._tracker: Optional[BYTETracker] = None
         self._target_lock: Optional[TargetLock] = None
         self._episode_active = False
@@ -207,23 +224,40 @@ class _AutocarEngine:
                 ) from e
         return self._embedder
 
+    def _get_face_recognizer(self) -> FaceRecognizer:
+        if self._face_recognizer is None:
+            detector_path = self.config.face_detector_model_path or f"{_MODELS_DIR}/face_detection_yunet_2023mar.onnx"
+            recognizer_path = self.config.face_recognizer_model_path or f"{_MODELS_DIR}/face_recognition_sface_2021dec.onnx"
+            try:
+                self._face_recognizer = FaceRecognizer(detector_path, recognizer_path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"followme_orchestrator.autocar_adapter: could not load the face detector/"
+                    f"recognizer weights at '{detector_path}' / '{recognizer_path}'. Not part of "
+                    f"the vendored repo — see modules/autocar/models/README.md."
+                ) from e
+        return self._face_recognizer
+
     def warmup(self) -> None:
-        """Eagerly constructs the detector + embedder and runs one throwaway inference through
-        each (confirmed with the user — model loading AND a backend's first-inference overhead
-        should both be absorbed at startup, not at the moment a gesture trigger actually fires,
-        which is exactly when a stutter is most noticeable). Idempotent — _get_detector()/
-        _get_embedder() only construct once; safe to call again."""
+        """Eagerly constructs the detector, OSNet embedder, and face recognizer, and runs one
+        throwaway inference through each (confirmed with the user — model loading AND a
+        backend's first-inference overhead should both be absorbed at startup, not at the moment
+        a gesture trigger actually fires, which is exactly when a stutter is most noticeable).
+        Idempotent — each _get_*() only constructs once; safe to call again."""
         detector = self._get_detector()
         detector.detect(np.zeros((480, 640, 3), dtype=np.uint8))
         embedder = self._get_embedder()
         embedder.extract(np.zeros((64, 64, 3), dtype=np.uint8))
+        face_recognizer = self._get_face_recognizer()
+        face_recognizer.detect_best_face(np.zeros((64, 64, 3), dtype=np.uint8))
 
     def start(self, person_name: str, initial_bbox_xywh: BboxXYWH, frame: np.ndarray, timestamp: float) -> None:
         profile_path = f"{_MODELS_DIR}/enrolled_{sanitize_person_name(person_name)}.npz"
         try:
             self._target_lock = TargetLock(
-                profile_path, embedder=self._get_embedder(),
-                similarity_threshold=self.config.reid_similarity_threshold,
+                profile_path, osnet_embedder=self._get_embedder(), face_recognizer=self._get_face_recognizer(),
+                face_similarity_threshold=self.config.face_similarity_threshold,
+                back_head_similarity_threshold=self.config.back_head_similarity_threshold,
                 acquire_rounds=self.config.reid_acquire_rounds,
                 acquire_cooldown_sec=self.config.reid_acquire_cooldown_sec,
                 device=self.config.device,

@@ -182,53 +182,91 @@ def _bbox_area(bbox) -> float:
 def build_target_profile(name: str) -> bool:
     """Builds modules/autocar/models/enrolled_<name>.npz from this person's CROPPED front/back
     images (not raw — see module docstring) — mirrors modules/autocar/scripts/enroll_person.py's
-    own composite-and-save logic exactly, just image-driven instead of a live loop. Reaches into
-    modules/autocar's vendored identity/ code via autocar_bootstrap, the same bridge
-    autocar_adapter.py already uses — modules/autocar/ itself is never touched by this.
+    own composite-and-save logic exactly (as of their commit 8037862), just image-driven instead
+    of a live loop. Reaches into modules/autocar's vendored identity/ code via autocar_bootstrap,
+    the same bridge autocar_adapter.py already uses — modules/autocar/ itself is never touched by
+    this.
 
     This is where ALL detection for the target profile happens — capture and cropping both run no
     detection at all (see register_person.py / build_cropped_roi above). Every detection in an
     image is a candidate; the LARGEST bbox wins (confirmed with the user) — since each image is
     already cropped to the operator-configured ROI the subject was asked to stand inside, the
     subject is the dominant figure in frame, and any smaller detection is background the ROI crop
-    didn't fully exclude, not a second person to reject the whole image over."""
+    didn't fully exclude, not a second person to reject the whole image over.
+
+    FRONT/BACK classification is a REAL face detector now (identity/face_recognizer.py's YuNet),
+    not a keypoint-confidence guess — matching their own scripts/enroll_person.py exactly since
+    their commit 8037862. FRONT samples additionally produce an SFace face_embedding (what
+    TargetLock actually matches against when a face is visible); the legacy OSNet head/lower
+    embeddings are still computed too, only to keep the saved .npz's shape consistent with older
+    profiles — unused by matching as of that commit."""
     print("\nBuilding autocar re-id profile...")
     autocar_bootstrap.ensure_on_path()
     from detector.yolov8_pose_torch import YOLOv8PoseTorch  # noqa: E402
     from identity import face_region, pose_gate  # noqa: E402
+    from identity.face_recognizer import FaceRecognizer  # noqa: E402
     from identity.osnet_embedder import OSNetEmbedder  # noqa: E402
     from identity.target_profile import save_target_profile  # noqa: E402
 
     detector = YOLOv8PoseTorch()
-    embedder = OSNetEmbedder(f"{AUTOCAR_MODELS_DIR}/osnet_x1_0_msmt17.onnx")
+    osnet_embedder = OSNetEmbedder(f"{AUTOCAR_MODELS_DIR}/osnet_x1_0_msmt17.onnx")
+    face_recognizer = FaceRecognizer(
+        f"{AUTOCAR_MODELS_DIR}/face_detection_yunet_2023mar.onnx",
+        f"{AUTOCAR_MODELS_DIR}/face_recognition_sface_2021dec.onnx",
+    )
 
-    def _collect(directory: str, want_face_visible: bool):
-        head_embeddings, lower_embeddings, aspect_ratios = [], [], []
+    def _detect_head_crop(path: str):
+        """Shared first half of both phases: largest-bbox person -> head-region crop. Returns
+        None if the image has no usable detection or a degenerate crop."""
+        image = cv2.imread(path)
+        if image is None:
+            return None
+        detections = detector.detect(image)
+        if not detections:
+            return None
+        det = max(detections, key=lambda d: _bbox_area(d.bbox))  # largest bbox = the subject
+        frame_h, frame_w = image.shape[:2]
+        head_crop, lower_crop = face_region.crop_head_lower(image, det.bbox, det.keypoints, frame_w, frame_h)
+        if head_crop.size == 0:
+            return None
+        return det, head_crop, lower_crop
+
+    def _collect_front(directory: str):
+        """A real face must be detected in the head crop — samples without one are skipped."""
+        face_embeddings, head_embeddings, lower_embeddings, aspect_ratios = [], [], [], []
         for path in sorted(glob.glob(os.path.join(directory, "*.jpg"))):
-            image = cv2.imread(path)
-            if image is None:
+            found = _detect_head_crop(path)
+            if found is None:
                 continue
-            detections = detector.detect(image)
-            if not detections:
-                continue
-            det = max(detections, key=lambda d: _bbox_area(d.bbox))  # largest bbox = the subject
-            if face_region.is_face_visible(det.keypoints) != want_face_visible:
-                continue
-            frame_h, frame_w = image.shape[:2]
-            head_crop, lower_crop = face_region.crop_head_lower(image, det.bbox, det.keypoints, frame_w, frame_h)
-            if head_crop.size == 0:
-                continue
-            head_embeddings.append(embedder.extract(head_crop))
+            det, head_crop, lower_crop = found
+            face_row = face_recognizer.detect_best_face(head_crop)
+            if face_row is None:
+                continue  # no face detected - not a usable FRONT sample
+            face_embeddings.append(face_recognizer.extract(head_crop, face_row))
+            head_embeddings.append(osnet_embedder.extract(head_crop))
             if lower_crop.size > 0:
-                lower_embeddings.append(embedder.extract(lower_crop))
+                lower_embeddings.append(osnet_embedder.extract(lower_crop))
             aspect_ratios.append(pose_gate.aspect_ratio_from_bbox(det.bbox))
-        return head_embeddings, lower_embeddings, aspect_ratios
+        return face_embeddings, head_embeddings, lower_embeddings, aspect_ratios
 
-    front_head, front_lower, front_ratios = _collect(_cropped_dir(name, "front"), want_face_visible=True)
-    back_head, _, _ = _collect(_cropped_dir(name, "back"), want_face_visible=False)
+    def _collect_back(directory: str):
+        """Accepted only when NO face is detected — confirms the subject is actually turned away."""
+        back_head_embeddings = []
+        for path in sorted(glob.glob(os.path.join(directory, "*.jpg"))):
+            found = _detect_head_crop(path)
+            if found is None:
+                continue
+            _det, head_crop, _lower_crop = found
+            if face_recognizer.detect_best_face(head_crop) is not None:
+                continue  # a face IS visible here - not actually turned away
+            back_head_embeddings.append(osnet_embedder.extract(head_crop))
+        return back_head_embeddings
 
-    if not front_head or not back_head:
-        print(f"FAILED: usable samples front={len(front_head)} back={len(back_head)} (need >= 1 each).")
+    front_face, front_head, front_lower, front_ratios = _collect_front(_cropped_dir(name, "front"))
+    back_head = _collect_back(_cropped_dir(name, "back"))
+
+    if not front_face or not back_head:
+        print(f"FAILED: usable samples front={len(front_face)} back={len(back_head)} (need >= 1 each).")
         return False
 
     def _composite(vectors):
@@ -236,16 +274,18 @@ def build_target_profile(name: str) -> bool:
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 1e-6 else vec
 
-    head_composite = _composite(front_head)
+    face_composite = _composite(front_face)
     back_head_composite = _composite(back_head)
-    lower_composite = _composite(front_lower) if front_lower else np.zeros_like(head_composite)
+    head_composite = _composite(front_head) if front_head else np.zeros(512, dtype=np.float32)
+    lower_composite = _composite(front_lower) if front_lower else np.zeros(512, dtype=np.float32)
     median_ratio = float(np.median(front_ratios)) if front_ratios else 1.0
 
     os.makedirs(AUTOCAR_MODELS_DIR, exist_ok=True)
     out_path = f"{AUTOCAR_MODELS_DIR}/enrolled_{name}.npz"
     save_target_profile(out_path, head_composite, lower_composite, median_ratio,
-                         len(front_head), back_head_embedding=back_head_composite)
-    print(f"Saved {len(front_head)} front + {len(back_head)} back samples -> '{out_path}'")
+                         len(front_face), back_head_embedding=back_head_composite,
+                         face_embedding=face_composite)
+    print(f"Saved {len(front_face)} front + {len(back_head)} back samples -> '{out_path}'")
     return True
 
 
