@@ -57,10 +57,14 @@ benchmarking the spec requires before a latency budget can be safely set.
 
 ## `human_detection`
 
-**Pipeline position:** first stage of the legacy `wave_facing`/`both` pipeline.
+**Pipeline position:** none — a standalone detector, own instance, used internally by
+`modules.target_tracking`/`modules.target_recovery`. Used to also feed a first-stage gesture
+module (`wave_facing_gate`) in a legacy pipeline; that module was removed (confirmed with the
+user — `gesture_hand_keypoint` is the only TRIGGER gesture method left, fed by
+`human_detection_roi` instead — see below), so this module no longer feeds anything in either
+`pretrigger` or `followme`.
 
-**Purpose:** fast, whole-frame, person-only detection + tracking, feeding one bbox+`track_id`
-per person to `wave_facing_gate`.
+**Purpose:** fast, whole-frame, person-only detection + tracking.
 
 **Working principle:** a standalone YOLO11n instance, `classes=[0]` (COCO person only, both a
 correctness filter and a real speed win — skips postprocessing for 79 irrelevant classes) +
@@ -73,55 +77,6 @@ identity/Re-ID — `track_id` is motion-continuity only, never a verified identi
 
 **Key parameters:** `confidence_threshold` (0.5, working default — not calibration-gated, no
 spec requires it). See [parameters.md](parameters.md#human_detection-optional).
-
----
-
-## `wave_facing_gate` (Gesture Method 1 — `condition`)
-
-**Pipeline position:** consumes one person crop per call — from `human_detection` in the legacy
-pipeline, or from `human_detection_roi` (via `main.py`'s adapter) in the face-first pipeline
-(`--modules pretrigger`/`followme`).
-
-**Purpose:** two independent, individually-debounced signals — `is_waving` and
-`is_facing_camera` — from static pose geometry + short-window motion. Does **not** compute the
-final trigger; the caller ANDs `registered_person AND is_waving AND is_facing_camera`.
-
-**Working principle:**
-1. Crop → preprocessed → a **standalone** MoveNet Lightning instance → 17 COCO keypoints
-   (y, x, score), decoded to bbox-pixel space.
-2. **`is_facing_camera` (raw, stateless):** a crude four-keypoint visibility proxy — passes iff
-   left_eye, right_eye, left_shoulder, right_shoulder *all* clear `confidence_threshold_facing`.
-   Not head-pose estimation; can't distinguish "facing camera" from "facing camera at a steep
-   angle," accepted for MVP.
-3. **Gate A (static pose, per-frame, no memory), evaluated independently per arm:** passes iff
-   wrist/elbow/shoulder confidence all clear `confidence_threshold_pose`, AND wrist is above
-   `wrist_height_fraction` of bbox height, AND wrist is above the elbow, AND **both**
-   wrist→elbow and wrist→shoulder vectors are within `verticality_threshold_deg` of vertical
-   (deliberate redundancy so one noisy keypoint can't singlehandedly pass the check).
-4. **Gate B (motion, short rolling window), evaluated independently per arm and independently of
-   Gate A** (accumulates every frame regardless of Gate A's pass/fail — the two gates share no
-   state): buffers wrist samples over `motion_window_seconds`; computes displacement vectors
-   between consecutive samples; drops any vector shorter than `motion_min_displacement_px` (the
-   noise floor that stops MoveNet's own per-frame inference jitter on a *static* pose from
-   registering as spurious direction changes — calibration-critical, unverified by default);
-   counts direction changes ≥ `motion_direction_change_angle_deg` between consecutive
-   significant vectors; passes iff that count ≥ `motion_min_direction_changes` AND the buffer has
-   ≥ `motion_min_samples`.
-5. An arm is "waving" this frame iff **both** Gate A and Gate B pass for it; the first arm found
-   passing wins (`wave_arm`), and `wave_arm` persists as the *last* arm that won even on frames
-   where neither currently passes (debug/display convenience).
-6. Both raw booleans (`waving_raw`, `facing_raw`) feed **independent** RED/YELLOW/GREEN
-   `ConfirmationTracker` instances — `is_waving`/`is_facing_camera` are `True` only at `GREEN`.
-
-**Public contract** (`GestureFacingResult`): `is_waving`, `is_facing_camera`, `waving_state`,
-`facing_state`, `wave_arm`, `facing_confidence_min`, `keypoints_raw`, plus
-`draw_debug(frame)` (keypoints, skeleton, arm vectors, Gate A pass/fail).
-
-**Key parameters:** `confidence_threshold_facing`, `confidence_threshold_pose`,
-`wrist_height_fraction`, `verticality_threshold_deg`, `motion_window_seconds`,
-`motion_confidence_threshold`, `motion_min_samples`, `motion_min_direction_changes`,
-`motion_direction_change_angle_deg`, `motion_min_displacement_px`,
-`confirmation_duration_seconds`. See [parameters.md](parameters.md#wave_facing-method-1--moduleswave_facing_gate).
 
 ---
 
@@ -209,7 +164,11 @@ defaults). See [parameters.md](parameters.md#human_detection_roi) for the tuning
 
 ---
 
-## `gesture_hand_keypoint` (Gesture Method 2 — `hand_keypoint`)
+## `gesture_hand_keypoint` — the sole TRIGGER gesture method
+
+Two alternatives — `wave_facing_gate` ("condition") and `gesture_trajectory_verifier`
+("trajectory_verifier") — used to exist; both were removed (confirmed with the user — this is
+the only TRIGGER gesture method left).
 
 **Pipeline position:** consumes one person crop + that person's full-frame bbox (needed for the
 palm-height gate) per call.
@@ -267,64 +226,8 @@ edges, and a red dotted horizontal line at the `palm_height_fraction` calibratio
 `min_fingers_curled_closed` (both scored out of 4 non-thumb fingers — see point 2),
 `thumb_extension_ratio_threshold` (gates OPEN only), `palm_height_fraction`,
 `max_transition_gap_seconds`, `confirmation_duration_seconds` — all required, all fail-closed.
-See [parameters.md](parameters.md#gesture_hand_keypoint-method-2) for the full tuning workflow.
-
----
-
-## `gesture_trajectory_verifier` (Gesture Method 3 — `trajectory_verifier`)
-
-**Pipeline position:** consumes one person crop per call (does not need the full-frame bbox —
-ignores `person_bbox_full_frame` if passed).
-
-**Purpose:** match a live arm trajectory against a small, shared, **generic** (not per-person)
-set of reference gesture trajectories via shape similarity.
-
-**Working principle:**
-1. A **standalone** MoveNet Lightning instance (independent from `wave_facing_gate`'s own
-   instance — model reused, no shared code/state) → 17 keypoints per frame, decoded to bbox pixel
-   space.
-2. **Per arm** (both computed every cycle, best score wins), a rolling `TrajectoryBuffer`
-   accumulates (wrist, elbow, shoulder) samples over `trajectory_window_seconds` — all three
-   points, not wrist-only (a design correction: wrist-only loses arm-shape information, since a
-   bent vs. straight arm can trace the same wrist path). A sample is only added if
-   wrist/elbow/shoulder confidence all clear `confidence_threshold`.
-3. **Normalization** (identical treatment for live and reference trajectories): translate each
-   point-track to start at its own first sample (relative motion, not absolute frame position);
-   scale by the bbox height *at capture time* (a stable body-scale reference — wrist-to-shoulder
-   distance itself changes during the gesture and would distort the normalization).
-4. **Resampling:** fixed-length, **time-based** linear interpolation to `resample_length` evenly
-   spaced points across the buffer's own time span (chosen over arc-length-based resampling — a
-   wave is roughly periodic, so non-uniform speed is a smaller risk; simpler; a well-scoped
-   future upgrade if empirical testing later shows shape fidelity suffers).
-5. **Similarity:** the resampled (wrist, elbow, shoulder) x,y sequence is flattened to one vector
-   and compared to every reference trajectory via **cosine similarity** (not DTW — an explicit
-   non-goal unless proven insufficient). The best (arm, reference, score) triple across both arms
-   and the whole reference set wins.
-6. **"Not ready" floor:** if the reference set has fewer than `MIN_REFERENCE_COUNT = 2` entries
-   (a fixed structural constant, not a config key — 0 or 1 references offer no meaningful "best
-   of set" comparison), `evaluate()` unconditionally returns `is_waving=False` with
-   `confidence_debug`/`matched_reference_id` both `None` and the real `reference_count` — visibly
-   distinguishable from a genuine non-match (which always has a real score), so this can't be
-   misread as "evaluated and didn't match" during calibration.
-7. The best score clearing `similarity_threshold` is the raw candidate signal, debounced through
-   the same RED/YELLOW/GREEN pattern as the other two methods.
-
-**Reference trajectories:** captured separately via `capture_reference_trajectory.py`, stored as
-`.npz` under `reference_trajectories/` (flattened vector + `resample_length` + `arm`), loaded
-fresh (`load_all()`) on every `evaluate()` call — not per-person, a small shared generic set.
-
-**Public contract** (`GestureMethodResult`): `is_waving`, `waving_state`, `confidence_debug`,
-`matched_reference_id`, `arm`, `reference_count`, `keypoints_raw`. **No `draw_debug()` method** —
-unlike Methods 1 and 2, this method's own standalone `visualize_gesture_trajectory_verifier.py`
-draws its debug overlay directly from `keypoints_raw` rather than through the result object;
-`main.py`'s adapter no-ops gracefully when asked to debug-draw this method.
-
-**Key parameters:** `confidence_threshold`, `trajectory_window_seconds`,
-`min_samples_for_comparison`, `resample_length`, `similarity_threshold`,
-`confirmation_duration_seconds` — all required, all currently `null` (uncalibrated). See
-[parameters.md](parameters.md#gesture_trajectory_verifier-method-3).
-
----
+See [parameters.md](parameters.md#gesture_hand_keypoint-plans03--the-sole-trigger-gesture-method)
+for the full tuning workflow.
 
 ---
 
@@ -623,8 +526,9 @@ Also requires `modules/autocar/models/osnet_x1_0_msmt17.onnx` to exist — see
 **Pipeline position:** the composition root for the ENTIRE pipeline — the only module permitted
 to import across other modules' `interface.py` boundaries besides `main.py` itself (a deliberate,
 documented isolation exception — see [architecture.md](architecture.md#design-rules-apply-across-every-module)
-rule #2). Composes `face_identity`, `human_detection_roi`, all three gesture methods, and
-`autocar_adapter` (see above) into one `step(frame, timestamp) -> FollowMeCommand` call.
+rule #2). Composes `face_identity`, `human_detection_roi`, `gesture_hand_keypoint` (the sole
+TRIGGER gesture method), and `autocar_adapter` (see above) into one
+`step(frame, timestamp) -> FollowMeCommand` call.
 `main.py --modules followme` is a thin CLI wrapper around this module (`configure()`/`step()`) —
 the actual sequencing logic lives here, not duplicated in `main.py`. `main.py --modules
 pretrigger` (the original `face_first` mode, renamed) still exists separately, stopping at
@@ -636,7 +540,7 @@ covering trigger detection all the way through steering.
 
 **Working principle:**
 1. **Eager warmup, at `configure()` time** (before `step()` is ever called): every model this
-   pipeline will use — `face_identity`, `human_detection_roi`, the chosen gesture method, and
+   pipeline will use — `face_identity`, `human_detection_roi`, `gesture_hand_keypoint`, and
    `autocar_adapter`'s YOLO-pose+OSNet (plus one throwaway inference through each, absorbing a
    backend's first-inference cost too) — is constructed right here, eagerly. `configure()` itself
    therefore takes a few seconds; the trade is deliberate (confirmed with the user) — that cost
@@ -646,7 +550,7 @@ covering trigger detection all the way through steering.
 2. **Pre-trigger** (mirrors `main.py --modules pretrigger`'s own sequencing exactly, per the
    spec's own audit instruction to replicate rather than reinvent it): `face_identity.evaluate()` →
    filter to `is_registered_match` → `human_detection_roi.evaluate()` per matched face → crop →
-   the chosen gesture method's `evaluate()`. The **first** registered person whose gesture
+   `gesture_hand_keypoint.evaluate()`. The **first** registered person whose gesture
    reaches `GREEN` this frame becomes the locked target — only one follow-me episode can ever be
    active (`autocar_adapter` is itself a single-episode module-level singleton) — and
    `autocar_adapter.start(person_name, ...)` force-locks immediately (see above).
@@ -668,8 +572,7 @@ covering trigger detection all the way through steering.
 separate downstream concern), `steering_angle_degrees` (signed, `None` when `should_move` is
 `False`), `debug_state` (this module's own state-name choices — `WAITING_FOR_TRIGGER`,
 `TRACKING_STARTED`, `TRACKING`, `TRACKING_STEERING_UNCALIBRATED`, `RECOVERING`, `STOPPED`).
-`configure(gesture_method=...)` **must** be called before the first `step()` — unlike every other
-module's `configure()`, there is no sensible default gesture method to lazily initialize with.
+`configure(...)` **must** be called before the first `step()` — see that function's own docstring.
 `draw_steering_arrow(frame, command)` draws the calculated steering direction as an arrow from
 bottom-center of the frame (0° = ahead, +/- = right/left) — not gated by `--debug`, since it's the
 actual robot command, not a per-module debug readout; no-ops while `should_move` is `False`.

@@ -6,13 +6,17 @@ module selection/wiring lives here in the root entry point, not inside any modul
 --modules selects which pipeline runs per frame:
     pretrigger   The face-first exploratory pipeline from plans/01-04, STOPPING at the trigger:
                  face detect+match (modules.face_identity) -> ROI-scoped human detection
-                 (modules.human_detection_roi) -> ONE of three interchangeable gesture methods
-                 (--gesture-method), per matched person. TRIGGER = registered_person (implied
-                 True, a face already matched) AND is_waving from the chosen gesture method.
-                 Renamed from the original "face_first" (plans/01-04 still call it that) once
-                 "followme" below started continuing PAST this same trigger point — this mode
-                 exists for calibrating/testing just the pre-trigger stages in isolation, same
-                 as it always did.
+                 (modules.human_detection_roi) -> the hand-keypoint gesture method
+                 (modules.gesture_hand_keypoint). TRIGGER = registered_person (implied True, a
+                 face already matched) AND is_waving from that gesture method. Renamed from the
+                 original "face_first" (plans/01-04 still call it that) once "followme" below
+                 started continuing PAST this same trigger point — this mode exists for
+                 calibrating/testing just the pre-trigger stages in isolation, same as it always
+                 did. Two other gesture methods (modules.wave_facing_gate = "condition",
+                 modules.gesture_trajectory_verifier = "trajectory_verifier") used to be
+                 selectable here via --gesture-method; both were removed (confirmed with the
+                 user — hand_keypoint is the only TRIGGER gesture method now), so there's no
+                 longer a method to choose.
     followme     The FULL pipeline (plans/01-08): everything "pretrigger" does, but continuing
                  past the trigger into modules.followme_orchestrator — target_tracking (record +
                  follow), target_recovery (re-acquire on loss), and PID steering. Composes
@@ -25,8 +29,7 @@ module selection/wiring lives here in the root entry point, not inside any modul
                  and the autocar re-id enrollment profile. Without --person-name: opens
                  register_person.RegistrationApp, a Tkinter CRUD UI listing everyone
                  registered/in-progress, to register a new person OR pick/re-capture/delete an
-                 existing one interactively. Ignores --mode/--show/--debug entirely
-                 (--gesture-method only required to actually start following someone afterward).
+                 existing one interactively. Ignores --mode/--show/--debug entirely.
                  Add --then-followme (headless path) to chain straight into camera followme mode
                  once registration succeeds; from the UI, select a fully-registered person and
                  click "Follow Me" to do the same thing interactively. Either way, one main.py
@@ -40,11 +43,9 @@ own color table).
 Standalone single-module test/visualization scripts (all support --show, some chain live with
 their own upstream modules where the module's own spec calls for it — see each script's
 docstring): modules/emergency_stop/test_estop.py, modules/human_detection/test_human_detection.py,
-modules/wave_facing_gate/test_wave_facing.py, modules/face_identity/{test_face_identity,
-visualize_face_identity}.py, modules/human_detection_roi/{test_human_detection_roi,
-visualize_human_detection_roi}.py, modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,
-visualize_gesture_hand_keypoint}.py, modules/gesture_trajectory_verifier/
-{test_gesture_trajectory_verifier,visualize_gesture_trajectory_verifier}.py,
+modules/face_identity/{test_face_identity, visualize_face_identity}.py,
+modules/human_detection_roi/{test_human_detection_roi, visualize_human_detection_roi}.py,
+modules/gesture_hand_keypoint/{test_gesture_hand_keypoint, visualize_gesture_hand_keypoint}.py,
 modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py,
 modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py,
 modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py,
@@ -55,14 +56,14 @@ multi-person operation.
 Usage:
     python main.py
         # ^ the simplest form — --modules defaults to "register", opening the Tkinter UI to
-        # register a new person or pick/re-capture/delete an existing one. Pass --gesture-method
-        # too if you want to use the UI's "Follow Me" button afterward (see below).
-    python main.py --mode camera --modules pretrigger --gesture-method hand_keypoint --show
-    python main.py --mode camera --modules followme --gesture-method hand_keypoint --show
-    python main.py --mode video --video path.mp4 --modules followme --gesture-method trajectory_verifier --show
+        # register a new person or pick/re-capture/delete an existing one, with "Follow Me"
+        # available on any fully-registered person (see below).
+    python main.py --mode camera --modules pretrigger --show
+    python main.py --mode camera --modules followme --show
+    python main.py --mode video --video path.mp4 --modules followme --show
     python main.py --modules register --person-name Nam --camera-index 0
-    python main.py --modules register --person-name Nam --then-followme --gesture-method hand_keypoint --show
-    python main.py --modules register --gesture-method hand_keypoint --show
+    python main.py --modules register --person-name Nam --then-followme --show
+    python main.py --modules register --show
 """
 import argparse
 import os
@@ -71,8 +72,6 @@ import time
 
 import cv2
 import yaml
-
-from modules.wave_facing_gate.interface import WaveFacingGateModule
 
 _WAVE_STATE_COLOR = {"RED": (0, 0, 255), "YELLOW": (0, 220, 255), "GREEN": (0, 200, 0)}
 
@@ -112,64 +111,35 @@ def open_capture(args: argparse.Namespace):
 
 class _GestureMethodAdapter:
     """
-    Normalizes the calling-convention difference between modules.wave_facing_gate ("condition" —
-    Method 1, predates the plans' shared GestureMethodResult contract, has its own two-signal
-    is_waving/is_facing_camera output) and modules.gesture_hand_keypoint / .gesture_trajectory_verifier
-    ("hand_keypoint" / "trajectory_verifier" — Methods 2/3, share the plans' GestureMethodResult
-    contract exactly). Lets run_pretrigger_pipeline() call any of the three the same way.
+    Thin wrapper around modules.gesture_hand_keypoint, the sole TRIGGER gesture method (two
+    others — modules.wave_facing_gate "condition" and modules.gesture_trajectory_verifier
+    "trajectory_verifier" — were removed; confirmed with the user hand_keypoint is the only one
+    kept). Stashes the raw per-call result so draw_debug() can render it without re-evaluating.
     """
 
-    def __init__(self, method_name: str):
-        self.method_name = method_name
+    def __init__(self):
+        import modules.gesture_hand_keypoint.interface as gi
+        self._module = gi
         self._last_result = None  # stashed by evaluate(), consumed by draw_debug()
-        if method_name == "condition":
-            self._module = WaveFacingGateModule()
-        elif method_name == "hand_keypoint":
-            import modules.gesture_hand_keypoint.interface as gi
-            self._module = gi
-        elif method_name == "trajectory_verifier":
-            import modules.gesture_trajectory_verifier.interface as gi
-            self._module = gi
-        else:
-            raise ValueError(f"Unknown gesture method '{method_name}'")
 
     def evaluate(self, track_id: int, crop, timestamp: float, person_bbox_full_frame=None):
-        """Returns (is_waving, waving_state, extra_debug_label). `person_bbox_full_frame` is
-        only used by hand_keypoint (its palm-height gate needs the person's full-frame bbox,
-        not just the crop) — ignored by the other two methods. Also stashes the raw result
-        object for draw_debug() below, since the tuple return here is print/state-only."""
-        if self.method_name == "condition":
-            r = self._module.process_frame(track_id=track_id, crop=crop)
-            extra = f"facing={r.facing_state} wave_arm={r.wave_arm}"
-            self._last_result = r
-            return r.is_waving, r.waving_state, extra
-
-        if self.method_name == "hand_keypoint":
-            r = self._module.evaluate(track_id, crop, timestamp, person_bbox_full_frame=person_bbox_full_frame)
-            extra = f"conf={r.confidence_debug} stage={r.sequence_stage} palm_facing={r.palm_facing_camera_debug}"
-        else:  # trajectory_verifier
-            r = self._module.evaluate(track_id, crop, timestamp)
-            extra = f"conf={r.confidence_debug} ref={r.matched_reference_id} arm={r.arm} refs={r.reference_count}"
+        """Returns (is_waving, waving_state, extra_debug_label). `person_bbox_full_frame` feeds
+        the palm-height gate (measured against the person's full-frame bbox, not just the crop)."""
+        r = self._module.evaluate(track_id, crop, timestamp, person_bbox_full_frame=person_bbox_full_frame)
+        extra = f"conf={r.confidence_debug} stage={r.sequence_stage} palm_facing={r.palm_facing_camera_debug}"
         self._last_result = r
         return r.is_waving, r.waving_state, extra
 
     def draw_debug(self, crop, person_bbox_full_frame=None) -> None:
-        """Draws the last evaluate() call's per-method debug overlay directly onto `crop` (a view
-        into the caller's frame) — same overlay each method's own standalone visualize_*.py
-        script draws. All three methods now define draw_debug(); this no-ops only if nothing has
-        been evaluated for this track yet."""
-        if self._last_result is None or not hasattr(self._last_result, "draw_debug"):
+        """Draws the last evaluate() call's debug overlay directly onto `crop` (a view into the
+        caller's frame) — same overlay gesture_hand_keypoint's own visualize_*.py script draws.
+        No-ops if nothing has been evaluated for this track yet."""
+        if self._last_result is None:
             return
-        if self.method_name == "hand_keypoint":
-            self._last_result.draw_debug(crop, person_bbox_full_frame=person_bbox_full_frame)
-        else:
-            self._last_result.draw_debug(crop)
+        self._last_result.draw_debug(crop, person_bbox_full_frame=person_bbox_full_frame)
 
     def release_track(self, track_id: int) -> None:
-        if self.method_name == "condition":
-            self._module.reset_track(track_id)
-        else:
-            self._module.release_track(track_id)
+        self._module.release_track(track_id)
 
 
 def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
@@ -186,7 +156,7 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
     from modules.human_detection_roi.interface import evaluate as evaluate_person
 
     face_registry = FaceRegistry(args.face_registry_dir)
-    gesture = _GestureMethodAdapter(args.gesture_method)
+    gesture = _GestureMethodAdapter()
 
     frame_idx = 0
     try:
@@ -253,16 +223,14 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
 
             # No per-frame release_track() here (deliberately removed, not just relaxed): a
             # person briefly not matched/found (occlusion, one missed detection) is NOT the
-            # same as "gone for good," and every gesture method's own per-track state is already
-            # self-healing against real elapsed wall-clock time without any help from this loop
-            # — Method 2's SequenceStateMachine resets itself via max_transition_gap_seconds the
-            # next time evaluate() runs after a gap, Method 1's motion buffers and Method 3's
-            # trajectory buffers both trim samples older than their own window on every call.
-            # Eagerly releasing on the first missed frame was wiping that state out from under
-            # those checks before they ever got to run — a bug, not the "hygiene" it looked like.
-            # track_id itself is bounded by the face registry's size (one entry per REGISTERED
-            # person, never per stranger), so leaving a track's state allocated indefinitely
-            # isn't a real memory concern at this project's scale.
+            # same as "gone for good," and gesture_hand_keypoint's own per-track state is already
+            # self-healing against real elapsed wall-clock time without any help from this loop —
+            # its SequenceStateMachine resets itself via max_transition_gap_seconds the next time
+            # evaluate() runs after a gap. Eagerly releasing on the first missed frame was wiping
+            # that state out from under that check before it ever got to run — a bug, not the
+            # "hygiene" it looked like. track_id itself is bounded by the face registry's size
+            # (one entry per REGISTERED person, never per stranger), so leaving a track's state
+            # allocated indefinitely isn't a real memory concern at this project's scale.
             print(line)
 
             if args.show:
@@ -317,7 +285,7 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> in
     """
     from modules.followme_orchestrator.interface import configure, draw_debug, draw_steering_arrow, step
 
-    configure(args.gesture_method, thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
+    configure(thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
 
     frame_idx = 0
     try:
@@ -383,18 +351,13 @@ def main() -> int:
     parser.add_argument(
         "--modules", choices=["pretrigger", "followme", "register"], default="register",
         help="Which pipeline to run: 'pretrigger' is the face-first exploratory pipeline from "
-             "plans/01-04, stopping at TRIGGER (requires --gesture-method); 'followme' is the "
-             "FULL pipeline (plans/01-08) continuing past the trigger into tracking/recovery/"
-             "steering via modules.followme_orchestrator (also requires --gesture-method); "
-             "'register' (the default — the natural starting point, register-or-choose then "
-             "follow) hands off to register_person instead of a per-frame pipeline (see that "
-             "file, and --person-name above).",
-    )
-    parser.add_argument(
-        "--gesture-method", choices=["condition", "hand_keypoint", "trajectory_verifier"],
-        help="Which gesture method 'pretrigger'/'followme' use: 'condition' = Method 1 "
-             "(modules.wave_facing_gate), 'hand_keypoint' = Method 2, 'trajectory_verifier' = "
-             "Method 3. Required when --modules pretrigger or followme.",
+             "plans/01-04, stopping at TRIGGER; 'followme' is the FULL pipeline (plans/01-08) "
+             "continuing past the trigger into tracking/recovery/steering via "
+             "modules.followme_orchestrator; 'register' (the default — the natural starting "
+             "point, register-or-choose then follow) hands off to register_person instead of a "
+             "per-frame pipeline (see that file, and --person-name above). Both pretrigger and "
+             "followme use modules.gesture_hand_keypoint as the TRIGGER gesture method — the "
+             "only one left after --gesture-method's other two choices were removed.",
     )
     parser.add_argument(
         "--face-registry-dir", default="modules/face_identity/registry_data",
@@ -423,14 +386,14 @@ def main() -> int:
         "--then-followme", action="store_true",
         help="--modules register --person-name (headless path) only: on successful registration, "
              "immediately continue into camera followme mode (as if --mode camera --modules "
-             "followme had been run right after). Requires --gesture-method. Skipped entirely if "
-             "registration itself fails. The UI path (no --person-name) does this interactively "
-             "instead, via its own \"Follow Me\" button.",
+             "followme had been run right after). Skipped entirely if registration itself fails. "
+             "The UI path (no --person-name) does this interactively instead, via its own "
+             "\"Follow Me\" button.",
     )
     parser.add_argument(
         "--debug", action="store_true",
-        help="Enable the full per-phase debug overlay: face bbox + ROI region + the chosen "
-             "--gesture-method's keypoints/skeleton/state for --modules pretrigger; all of that "
+        help="Enable the full per-phase debug overlay: face bbox + ROI region + the hand-keypoint "
+             "gesture method's keypoints/skeleton/state for --modules pretrigger; all of that "
              "PLUS target_tracking's bbox/center-line/reverify readout and target_recovery's "
              "search status for --modules followme (via "
              "modules.followme_orchestrator.draw_debug(), which composes each module's own "
@@ -444,9 +407,6 @@ def main() -> int:
 
         if args.person_name:
             # Headless path — register exactly this one person, no GUI.
-            if args.then_followme and not args.gesture_method:
-                parser.error("--gesture-method is required when --then-followme is set")
-
             result = register_person.run(
                 args.person_name, args.camera_index, args.front_samples, args.back_samples, args.config,
             )
@@ -462,7 +422,7 @@ def main() -> int:
             # until the app window closes; app.chosen_name is None unless "Follow Me" was used.
             app = register_person.RegistrationApp(
                 args.camera_index, args.front_samples, args.back_samples, args.config,
-                can_follow_me=bool(args.gesture_method),
+                can_follow_me=True,
             )
             app.mainloop()
             if not app.chosen_name:
@@ -483,8 +443,6 @@ def main() -> int:
         parser.error("--mode is required when --modules pretrigger or followme")
     if args.mode == "video" and not args.video:
         parser.error("--video is required when --mode video")
-    if not args.gesture_method:
-        parser.error(f"--gesture-method is required when --modules {args.modules}")
 
     cap, source_desc = open_capture(args)
     if not cap.isOpened():
@@ -494,10 +452,7 @@ def main() -> int:
     # "Initial" stage: one-time banner identifying which mode is about to run and its key
     # settings, before any per-frame logging starts — so a terminal log is never ambiguous about
     # which pipeline produced the lines that follow it.
-    print(
-        f"mode={args.modules.upper()} source={source_desc} "
-        f"gesture_method={args.gesture_method} show={args.show} debug={args.debug}"
-    )
+    print(f"mode={args.modules.upper()} source={source_desc} show={args.show} debug={args.debug}")
 
     if args.modules == "pretrigger":
         return run_pretrigger_pipeline(cap, args, source_desc)

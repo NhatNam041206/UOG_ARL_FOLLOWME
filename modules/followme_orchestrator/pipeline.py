@@ -1,18 +1,19 @@
 """
 Per-frame orchestrator sequencing (plans/08 §1): pre-trigger (face_identity ->
-human_detection_roi -> gesture method -> trigger check) then, once a tracking episode is active,
-post-trigger (autocar_adapter -> SteeringController; autocar_adapter's own TargetLock folds
-tracking-while-present and recovery-on-loss into one state machine, so there is no separate
+human_detection_roi -> gesture_hand_keypoint -> trigger check) then, once a tracking episode is
+active, post-trigger (autocar_adapter -> SteeringController; autocar_adapter's own TargetLock
+folds tracking-while-present and recovery-on-loss into one state machine, so there is no separate
 recovery step here). Not part of the public contract — external callers use interface.py only.
 
-Composes across module boundaries — face_identity, human_detection_roi, the gesture methods,
-autocar_adapter (a sibling file in this same package, not another module) — which is normally
-forbidden by this project's own-instance isolation convention (docs/architecture.md rule #2/#3:
-only main.py imports across module boundaries). This module is the ONE deliberate, documented
-exception (plans/08 §0.3): it exists specifically to be the reusable, importable version of what
-main.py's face_first pipeline currently does ad hoc, plus the new post-trigger tracking/steering
-sequencing main.py does not do at all. It still never reaches into any composed module's PRIVATE
-implementation — only public interface.py contracts, exactly as main.py already does today.
+Composes across module boundaries — face_identity, human_detection_roi, gesture_hand_keypoint (the
+sole TRIGGER gesture method — two others were removed, confirmed with the user), autocar_adapter
+(a sibling file in this same package, not another module) — which is normally forbidden by this
+project's own-instance isolation convention (docs/architecture.md rule #2/#3: only main.py imports
+across module boundaries). This module is the ONE deliberate, documented exception (plans/08
+§0.3): it exists specifically to be the reusable, importable version of what main.py's face_first
+pipeline currently does ad hoc, plus the new post-trigger tracking/steering sequencing main.py
+does not do at all. It still never reaches into any composed module's PRIVATE implementation —
+only public interface.py contracts, exactly as main.py already does today.
 
 Manages a SINGLE active follow-me episode, mirroring autocar_adapter's own single-episode design
 — this module can only ever follow one person at a time by construction (autocar_adapter is
@@ -49,12 +50,12 @@ class PipelineResult(NamedTuple):
 
 
 class FollowMeOrchestratorPipeline:
-    def __init__(self, config: FollowMeOrchestratorConfig, gesture_method: str,
+    def __init__(self, config: FollowMeOrchestratorConfig,
                  face_registry_dir: str = "modules/face_identity/registry_data",
                  thresholds_config_path: str = "config/thresholds.yaml"):
         self.config = config
         self.registry = FaceRegistry(face_registry_dir)
-        self.gesture_adapter = GestureMethodAdapter(gesture_method)
+        self.gesture_adapter = GestureMethodAdapter()
         self.steering = SteeringController(
             config.kp, config.ki, config.kd, config.max_steering_angle_degrees, config.fov_degrees,
         )
@@ -122,15 +123,13 @@ class FollowMeOrchestratorPipeline:
 
         # No per-frame release_track() for tracks not seen this frame (deliberately absent, not
         # just relaxed): a person briefly not matched/found (occlusion, one missed detection) is
-        # not "gone for good," and every gesture method's own per-track state already self-heals
-        # against real elapsed wall-clock time without any help from this loop — Method 2's
+        # not "gone for good," and gesture_hand_keypoint's own per-track state already self-heals
+        # against real elapsed wall-clock time without any help from this loop — its
         # SequenceStateMachine resets itself via max_transition_gap_seconds the next time
-        # evaluate() runs after a gap; Method 1's motion buffers and Method 3's trajectory
-        # buffers both trim samples older than their own window on every call. Eagerly releasing
-        # on the first missed frame wiped that state out from under those checks before they
-        # ever got to run. track_id itself is bounded by the face registry's size (one entry per
-        # REGISTERED person, never per stranger), so leaving state allocated indefinitely isn't a
-        # real memory concern at this project's scale.
+        # evaluate() runs after a gap. Eagerly releasing on the first missed frame wiped that
+        # state out from under that check before it ever got to run. track_id itself is bounded
+        # by the face registry's size (one entry per REGISTERED person, never per stranger), so
+        # leaving state allocated indefinitely isn't a real memory concern at this project's scale.
         for face in face_results:
             person = evaluate_person(frame, face.face_bbox)
             self._debug_pretrigger.append((face, person))

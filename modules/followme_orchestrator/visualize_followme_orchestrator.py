@@ -10,8 +10,8 @@ last_person_bbox — a debug-only convenience field, not part of FollowMeCommand
 contract; see pipeline.py). Logs FollowMeCommand fields to console per frame.
 
 Usage:
-    python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method hand_keypoint --mode camera [--camera-index 0]
-    python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method hand_keypoint --mode video --video path.mp4
+    python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode camera [--camera-index 0]
+    python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode video --video path.mp4
 """
 import argparse
 import sys
@@ -45,7 +45,6 @@ def open_capture(args: argparse.Namespace):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone followme_orchestrator end-to-end visualization/debugging tool.")
-    parser.add_argument("--gesture-method", choices=["condition", "hand_keypoint", "trajectory_verifier"], required=True)
     parser.add_argument("--mode", choices=["camera", "video"], required=True)
     parser.add_argument("--video", help="Path to a recorded video file. Required when --mode video.")
     parser.add_argument("--camera-index", type=int, default=0)
@@ -65,7 +64,7 @@ def main() -> int:
     # Own pipeline instance (not the module-level singleton behind interface.step()) so this
     # debug tool can read last_person_bbox for drawing — a reach-in that's fine here since this
     # file lives inside the module's own package (same pattern every other visualize_*.py uses).
-    pipeline = FollowMeOrchestratorPipeline(config, args.gesture_method, args.face_registry_dir, args.config)
+    pipeline = FollowMeOrchestratorPipeline(config, args.face_registry_dir, args.config)
 
     frame_idx = 0
     try:

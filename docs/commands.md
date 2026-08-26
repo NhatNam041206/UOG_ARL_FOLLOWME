@@ -15,31 +15,30 @@ real video file path; there is no bundled sample video in this repo.
 
 ```bash
 # Simplest form: --modules defaults to "register", opening the Tkinter registration UI
+# (the UI's "Follow Me" button works out of the box — no extra flag needed)
 python main.py
-
-# Same, but with --gesture-method so the UI's "Follow Me" button works afterward
-python main.py --gesture-method hand_keypoint --show
 
 # Register ONE person headlessly, no UI
 python main.py --modules register --person-name Nam --camera-index 0
 
 # Register, then immediately chain into followme mode once registration succeeds
-python main.py --modules register --person-name Nam --then-followme --gesture-method hand_keypoint --show
+python main.py --modules register --person-name Nam --then-followme --show
 
 # pretrigger: the face-first pipeline (plans/01-04), STOPPING at TRIGGER -- for calibrating the
 # pre-trigger stages in isolation before trusting the full pipeline (was called face_first).
-python main.py --mode camera --modules pretrigger --gesture-method hand_keypoint --show --debug
-python main.py --mode camera --modules pretrigger --gesture-method condition --show --debug
-python main.py --mode camera --modules pretrigger --gesture-method trajectory_verifier --show --debug
+# Uses modules.gesture_hand_keypoint as the TRIGGER gesture method (the only one left — two
+# others, "condition"/wave_facing_gate and "trajectory_verifier"/gesture_trajectory_verifier,
+# were removed).
+python main.py --mode camera --modules pretrigger --show --debug
 
 # followme: the FULL pipeline (plans/01-08) -- face match -> ROI body detect -> gesture ->
 # tracking+recovery (modules.autocar, via autocar_adapter) -> PID steering, continuing PAST the
 # trigger via modules.followme_orchestrator. --debug draws EVERY phase's overlay; the
 # steering-direction arrow is drawn separately, whenever --show is on.
-python main.py --mode camera --modules followme --gesture-method hand_keypoint --show --debug
+python main.py --mode camera --modules followme --show --debug
 
 # Against a recorded video instead of a live camera
-python main.py --mode video --video path/to/file.mp4 --modules followme --gesture-method hand_keypoint --show --debug
+python main.py --mode video --video path/to/file.mp4 --modules followme --show --debug
 ```
 
 | Flag | Applies to | Meaning |
@@ -47,7 +46,6 @@ python main.py --mode video --video path/to/file.mp4 --modules followme --gestur
 | `--mode camera \| video` | `pretrigger`/`followme` | Live webcam vs. recorded file (`--video` required for the latter); required for these two, ignored for `register` |
 | `--camera-index N` | `--mode camera`, `register` | OS camera device index |
 | `--modules` | always | `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) \| `register` (**default**) — hands off to `register_person`, not a per-frame pipeline |
-| `--gesture-method` | `pretrigger \| followme`, optionally `register` | `condition` (Method 1) \| `hand_keypoint` (Method 2) \| `trajectory_verifier` (Method 3) — required for `pretrigger`/`followme`; only needed for `register` if using `--then-followme` or the UI's "Follow Me" button |
 | `--face-registry-dir` | `pretrigger \| followme` | Defaults to `modules/face_identity/registry_data` |
 | `--config` | `followme`, `register` | Defaults to `config/thresholds.yaml`, passed to `followme_orchestrator.configure()` or `register_person.run()` |
 | `--person-name` | `register` | Headless single-person registration, no UI. Omit to open the Tkinter UI. |
@@ -64,8 +62,8 @@ overlay than `main.py --modules followme --show` draws (frame-center line, per-s
 steering readout), run `followme_orchestrator`'s own tool directly instead:
 
 ```bash
-python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method hand_keypoint --mode camera [--camera-index 0]
-python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method hand_keypoint --mode video --video path/to/file.mp4
+python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode camera [--camera-index 0]
+python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode video --video path/to/file.mp4
 ```
 
 `followme_orchestrator.configure()` (called once, before the frame loop, by any of the paths
@@ -133,14 +131,6 @@ until calibrated.
 python -m modules.human_detection.test_human_detection path/to/video.mp4 --show
 ```
 
-### `wave_facing_gate` (Gesture Method 1)
-
-```bash
-python -m modules.wave_facing_gate.test_wave_facing path/to/video.mp4 --show
-```
-Feeds the WHOLE frame as a single `track_id=1` crop (no upstream detector in this test) — point
-the camera at one person.
-
 ### `face_identity`
 
 ```bash
@@ -175,7 +165,11 @@ python -m modules.human_detection_roi.visualize_human_detection_roi --mode camer
 python -m modules.human_detection_roi.visualize_human_detection_roi --mode video --video path/to/video.mp4
 ```
 
-### `gesture_hand_keypoint` (Gesture Method 2)
+### `gesture_hand_keypoint` (the TRIGGER gesture method)
+
+Two other gesture methods — `wave_facing_gate` ("condition") and `gesture_trajectory_verifier`
+("trajectory_verifier") — used to exist as interchangeable alternatives; both were removed
+(confirmed with the user — hand_keypoint is the only TRIGGER gesture method now).
 
 ```bash
 python -m modules.gesture_hand_keypoint.test_gesture_hand_keypoint path/to/video.mp4
@@ -185,25 +179,6 @@ python -m modules.gesture_hand_keypoint.test_gesture_hand_keypoint path/to/video
 # dotted palm_height_fraction calibration line, and the current sequence stage.
 python -m modules.gesture_hand_keypoint.visualize_gesture_hand_keypoint --mode camera [--camera-index 0]
 python -m modules.gesture_hand_keypoint.visualize_gesture_hand_keypoint --mode video --video path/to/video.mp4
-```
-
-### `gesture_trajectory_verifier` (Gesture Method 3)
-
-```bash
-python -m modules.gesture_trajectory_verifier.test_gesture_trajectory_verifier path/to/video.mp4
-
-# Live visualization, chained with face_identity + human_detection_roi. Draws the live wrist
-# path plus a normalized live-vs-best-reference inset panel.
-python -m modules.gesture_trajectory_verifier.visualize_gesture_trajectory_verifier --mode camera [--camera-index 0]
-python -m modules.gesture_trajectory_verifier.visualize_gesture_trajectory_verifier --mode video --video path/to/video.mp4
-```
-
-**Capturing a reference wave** (needed before this method can produce anything but "not ready" —
-requires at least 2 references in the shared set):
-```bash
-python -m modules.gesture_trajectory_verifier.capture_reference_trajectory <reference_id> --mode camera [--camera-index 0]
-python -m modules.gesture_trajectory_verifier.capture_reference_trajectory <reference_id> --mode video --video path/to/video.mp4
-# Perform ONE clean wave, then press 'q' to finish and save.
 ```
 
 ### `appearance_verifier`
@@ -252,13 +227,12 @@ above) — `target_recovery`'s Path A filters specifically for this name.
 ### `followme_orchestrator` (the FULL pipeline, all 8 plans composed together)
 
 ```bash
-python -m modules.followme_orchestrator.test_followme_orchestrator path/to/video.mp4 --gesture-method hand_keypoint
+python -m modules.followme_orchestrator.test_followme_orchestrator path/to/video.mp4
 
 # Live visualization: face-center line, tracked/reacquired bbox, debug_state, should_move, steering angle
-python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method hand_keypoint --mode camera [--camera-index 0]
-python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method hand_keypoint --mode video --video path/to/video.mp4
+python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode camera [--camera-index 0]
+python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode video --video path/to/video.mp4
 ```
-Requires `--gesture-method` (no default, same requirement as `main.py --modules pretrigger/followme`).
 Steering output (`should_move`/`steering_angle_degrees`) stays fail-closed (`should_move=False`)
 until `camera.fov_degrees` and the `steering` section's `kp`/`ki`/`kd`/`max_steering_angle_degrees`
 are calibrated (see [`parameters.md`](parameters.md#steering-plans08)) — trigger detection,
@@ -272,13 +246,13 @@ tracking, and recovery all work regardless of steering calibration state.
    builds both the face registry entry and the `modules/autocar` re-id profile in one session.
 2. `visualize_face_identity` — confirm you're matched live.
 3. `visualize_human_detection_roi` — confirm your body bbox tracks correctly off your face.
-4. Whichever gesture method's `visualize_*` you plan to use — confirm the gesture triggers GREEN.
-5. `main.py --modules pretrigger --gesture-method <method> --show --debug` — the pre-trigger
-   pipeline, all four stages together (stops at TRIGGER).
+4. `gesture_hand_keypoint`'s `visualize_*` — confirm the gesture triggers GREEN.
+5. `main.py --modules pretrigger --show --debug` — the pre-trigger pipeline, all four stages
+   together (stops at TRIGGER).
 6. `cd modules/autocar && python main.py --source 0 --target models/enrolled_<you>.npz` — confirm
    the vendored tracking+recovery backbone locks onto and re-acquires you in isolation, using the
    profile step 1 just built.
-7. `main.py --modules followme --gesture-method <method> --show --debug` — the FULL pipeline in
+7. `main.py --modules followme --show --debug` — the FULL pipeline in
    one command: trigger → tracking+recovery (`autocar_adapter`) → steering, all composed, with
    every phase's debug overlay AND the steering-direction arrow visible.
    (`modules.followme_orchestrator.visualize_followme_orchestrator` runs the same composed

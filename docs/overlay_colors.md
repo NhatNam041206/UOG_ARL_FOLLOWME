@@ -25,11 +25,10 @@ almost everywhere:
 | 🟢 Green | `(0, 200, 0)` | Condition held continuously long enough — confirmed, trusted. |
 
 This exact triple (`RED`/`YELLOW`/`GREEN` → those three BGR values) is independently
-re-declared in `main.py` (`_WAVE_STATE_COLOR`), `modules/gesture_hand_keypoint/visualize_gesture_hand_keypoint.py`,
-and `modules/gesture_trajectory_verifier/visualize_gesture_trajectory_verifier.py` — same
-isolation convention as the `ConfirmationTracker` classes themselves (independently
-reimplemented per module, not shared, but deliberately kept visually identical so the meaning
-transfers across every screen you look at).
+re-declared in `main.py` (`_WAVE_STATE_COLOR`) and
+`modules/gesture_hand_keypoint/visualize_gesture_hand_keypoint.py` — same isolation convention as
+the `ConfirmationTracker` classes themselves (independently reimplemented per module, not shared,
+but deliberately kept visually identical so the meaning transfers across every screen you look at).
 
 **Caveat worth knowing before reading composited overlays** (`--modules followme`): yellow and
 green are *reused* for unrelated meanings in other layers drawn on the same frame — e.g. yellow
@@ -69,27 +68,12 @@ Also (in `main.py`'s `pretrigger` mode and `visualize_human_detection_roi.py` sp
 in the reusable `draw_debug()` itself): a separate blue-ish `(255, 100, 0)` rectangle for the
 **input face bbox**, drawn by the calling script itself, one layer below.
 
-### 3. Gesture method (one of three, `--gesture-method`) — `GestureMethodResult.draw_debug(crop, ...)`
+### 3. Gesture method (`gesture_hand_keypoint`, the sole TRIGGER gesture method) — `GestureMethodResult.draw_debug(crop, ...)`
 
-All three draw onto the **person crop** (not full-frame coordinates) — a numpy view into `frame`,
-so drawing on it updates `frame` in place.
-
-**Method 1 — `condition` (`wave_facing_gate`):**
-
-| Color | BGR | Meaning |
-|---|---|---|
-| 🟢 Green | `(0, 255, 0)` | Keypoint circle — MoveNet confidence > 0.5 ("high confidence"). |
-| 🟠 Orange | `(0, 165, 255)` | Keypoint circle — confidence between the drawing floor (0.2) and 0.5 ("low confidence but shown"). |
-| ⚫ Dark gray | `(100, 100, 100)` | Skeleton connection lines between keypoints. |
-| 🔵 Blue | `(255, 0, 0)` | Left-arm wrist→elbow→shoulder vector. |
-| 🔴 Red | `(0, 0, 255)` | Right-arm wrist→elbow→shoulder vector. |
-| ⚪ Light gray | `(200, 200, 200)` | (Available but not currently drawn by `draw_debug()` — reserved for a bbox outline.) |
-
-Arm-vector **color is side (left/right), not pass/fail** — Gate A pass/fail is instead encoded
-as **line thickness**: 3px if Gate A currently passes for that arm, 1px if it doesn't. Don't read
-arm-vector color as a verdict; read its thickness.
-
-**Method 2 — `hand_keypoint` (`gesture_hand_keypoint`):**
+Two alternatives — `wave_facing_gate` ("condition") and `gesture_trajectory_verifier`
+("trajectory_verifier") — used to exist and each had their own distinct overlay; both were
+removed (confirmed with the user). Draws onto the **person crop** (not full-frame coordinates) —
+a numpy view into `frame`, so drawing on it updates `frame` in place.
 
 | Color | BGR | Meaning |
 |---|---|---|
@@ -104,20 +88,6 @@ green/gray, on the skeleton+keypoints) and the per-finger extended/curled color 
 each finger's tip↔PIP edge and the thumb's tip↔wrist edge) — they can disagree on a single frame
 (e.g. 4 fingers read green/extended but the whole hand is still gray if the 5th finger doesn't
 agree), which is expected, not a bug.
-
-**Method 3 — `trajectory_verifier` (`gesture_trajectory_verifier`):**
-
-| Color | BGR | Meaning |
-|---|---|---|
-| 🟢 Green | `(0, 255, 0)` | Keypoint circles (all 17 MoveNet points, confidence ≥ 0.2). |
-| ⚫ Gray | `(100, 100, 100)` | Skeleton connection lines. |
-| 🟠 Orange | `(0, 200, 255)` | Highlighted wrist→elbow→shoulder vector for whichever arm (`self.arm`) produced the best similarity score this frame — drawn 3px thick, on top of the plain skeleton. |
-
-Unlike Method 1, this highlight doesn't encode pass/fail via thickness — it just marks *which*
-arm is currently the best-scoring candidate. (Its own standalone `visualize_gesture_trajectory_verifier.py`
-tool additionally draws a small inset panel comparing the live wrist path (`(255, 150, 0)`, a
-blue-ish orange) against the best-matching reference trajectory's path (`(0, 200, 255)`, orange)
-— that inset is specific to that one script, not part of the reusable `draw_debug()`.)
 
 ### 4. Pipeline-level bbox + label (`main.py`, `--show` alone — not gated by `--debug`)
 
@@ -210,13 +180,6 @@ below); only `main.py`'s dedicated modes for exercising them together are gone.
 [`modules.md`](modules.md#emergency_stop). The color exists only to distinguish "confidently
 clear" from "not confident enough to say GO" for a human reading the overlay; every consumer of
 the decision itself treats `UNCERTAIN` identically to `STOP`.
-
-### `wave_facing` legacy pipeline bbox (`main.py`'s `wave_bbox_color()`, reusing `_WAVE_STATE_COLOR`)
-
-Same RED/YELLOW/GREEN triple as the universal convention above, computed from BOTH
-`is_waving`/`is_facing_camera` together: green only once *both* are GREEN, yellow if *either* is
-still YELLOW, red otherwise. The per-person debug overlay under it (when `--debug` is set) is
-`wave_facing_gate`'s own `draw_debug()`, described under Method 1 above.
 
 ### `human_detection` (legacy whole-frame detector, `test_human_detection.py`)
 

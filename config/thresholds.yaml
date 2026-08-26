@@ -52,46 +52,6 @@ emergency_stop:
   # --- Resume logic (spec §3.6) ---
   resume_buffer_seconds: null  # PLACEHOLDER — requires empirical calibration (~2-3s starting point per spec)
 
-# Values under `wave_facing:` are STARTING GUESSES (spec §9's suggested starting points), NOT
-# calibrated values — see the Wave Gesture + Facing-Camera Gate spec (v2) §11 for the required
-# empirical calibration checklist (held-still-raised-arm jitter measurement, real wave/non-wave
-# footage across people/distances/lighting, etc.). They exist only so the module can be exercised
-# end-to-end for the first time; treat every number below as unverified until measured. If any
-# key here is later set back to null, modules.wave_facing_gate.interface.WaveFacingGateModule
-# holds is_waving=False and is_facing_camera=False on every frame (both confirmation trackers
-# stuck RED) — same "uncalibrated degrades to the safe/negative state, never a silent default"
-# convention as emergency_stop above.
-wave_facing:
-  # Optional — not a threshold. Where to load MoveNet Lightning from (spec §2); defaults to the
-  # official TF Hub handle, which auto-downloads and caches weights on first use. Override to
-  # point at a local SavedModel directory instead.
-  # movenet_tfhub_handle: "https://tfhub.dev/google/movenet/singlepose/lightning/4"
-
-  # --- is_facing_camera (spec §3) ---
-  confidence_threshold_facing: 0.3  # STARTING GUESS (spec range ~0.3-0.5) — not calibrated
-
-  # --- Gate A: static pose gate (spec §4.1) ---
-  confidence_threshold_pose: 0.3    # STARTING GUESS — wrist/elbow/shoulder confidence floor
-  wrist_height_fraction: 0.5        # STARTING GUESS — upper 50% of bbox
-  verticality_threshold_deg: 25     # STARTING GUESS (spec range ~20-30 deg from vertical)
-
-  # --- Gate B: motion gate (spec §4.2) ---
-  motion_window_seconds: 1.2              # STARTING GUESS (spec range ~1.0-1.5s)
-  motion_confidence_threshold: 0.3        # STARTING GUESS — same as confidence_threshold_pose for now
-  motion_min_samples: 5                   # STARTING GUESS — not spec-suggested, needs calibration
-  motion_min_direction_changes: 2         # STARTING GUESS
-  motion_direction_change_angle_deg: 90   # STARTING GUESS — sensitivity knob #1
-  # Sensitivity knob #2 and the primary noise floor (spec §4.4) — MUST be calibrated from real
-  # held-still-raised-arm footage on target hardware BEFORE motion_direction_change_angle_deg is
-  # tuned; see the module spec's §11 calibration checklist. This is what stops MoveNet's own
-  # per-frame inference jitter on a static pose from registering as spurious direction changes.
-  # 8px is an UNVERIFIED guess, not a measured jitter floor — do not trust it past a first smoke
-  # test; a stretch/reach held still may false-positive as waving until this is measured for real.
-  motion_min_displacement_px: 8           # STARTING GUESS — REQUIRED, no verified value yet
-
-  # --- Confirmation state machine (spec §6) ---
-  confirmation_duration_seconds: 1.0  # STARTING GUESS (spec range ~1.0-2.0s)
-
 # Camera configuration — used by main.py when --mode camera is selected, and by
 # modules.followme_orchestrator's SteeringController (plans/08 §2/§3). Command-line
 # --camera-index takes precedence over camera_index below.
@@ -121,9 +81,9 @@ steering:
   kd: null                          # TODO: calibrate empirically
   max_steering_angle_degrees: null  # TODO: set from the servo/Ackermann hardware's own datasheet limit — not a tuning target
 
-# Human detection (optional) — feeds per-person bboxes to modules.wave_facing_gate (one
-# is_waving/is_facing_camera evaluation per detected person). Not calibration-gated like
-# emergency_stop/wave_facing above (no spec requires it here) — these have working defaults.
+# Human detection (optional, standalone instance) — own detector used internally by
+# modules.target_tracking / modules.target_recovery. Not calibration-gated (no spec requires it
+# here) — these have working defaults.
 human_detection:
   # yolo_model_path: "yolo11n.onnx"  # optional override, defaults to the nano model at repo root
   confidence_threshold: 0.5  # YOLO detection confidence floor for the person class
@@ -160,21 +120,20 @@ human_detection_roi:
   roi_width_fraction: 0.8     # default — width = face_w * roi_expansion_factor * 0.6
   detection_confidence_threshold: 0.5  # STARTING GUESS — standard YOLO starting point
 
-# Gesture Detection — Method 2, Hand Keypoint (plans/03_gesture_hand_keypoint.md). REDESIGNED —
-# no longer motion-based. Pure hand-shape sequence classification, MediaPipe landmark geometry
-# only (no wrist motion, no trajectory, no arm geometry). Valid gesture = OPEN -> CLOSED -> OPEN
-# -> CLOSED, each transition within max_transition_gap_seconds of the last, starting from OPEN.
-# Every OPEN/CLOSED read must also independently clear the palm_height_fraction gate (palm/wrist
-# in the upper fraction of the person's FULL-FRAME bbox from modules.human_detection_roi) —
-# failing that gate is an immediate reset to WAITING_OPEN, confirmed with the user. Only ONE hand
-# drives the sequence per frame — whichever confident hand clears the height gate (highest
-# confidence if more than one), Left/Right side ignored entirely. CONFIRMED (sequence complete)
-# feeds the shared RED/YELLOW/GREEN confirmation tracker exactly as before.
-# One of three interchangeable, independently-implemented gesture methods (see also
-# modules.wave_facing_gate = Method 1, and gesture_trajectory_verifier below = Method 3) — none
-# share config values. Values below are STARTING GUESSES, NOT calibrated — if any key is later
-# set back to null, is_waving stays False on every call (fail-closed); hand detection/keypoints
-# still run and are visualizable regardless of calibration state.
+# Gesture Detection — Hand Keypoint, the sole TRIGGER gesture method (plans/03_gesture_hand_keypoint.md
+# — was "Method 2" back when modules.wave_facing_gate and modules.gesture_trajectory_verifier
+# also existed as alternatives; both were removed, this is the only one left). Pure hand-shape
+# sequence classification, MediaPipe landmark geometry only (no wrist motion, no trajectory, no
+# arm geometry). Valid gesture = OPEN -> CLOSED -> OPEN -> CLOSED, each transition within
+# max_transition_gap_seconds of the last, starting from OPEN. Every OPEN/CLOSED read must also
+# independently clear the palm_height_fraction gate (palm/wrist in the upper fraction of the
+# person's FULL-FRAME bbox from modules.human_detection_roi) — failing that gate is an immediate
+# reset to WAITING_OPEN, confirmed with the user. Only ONE hand drives the sequence per frame —
+# whichever confident hand clears the height gate (highest confidence if more than one), Left/
+# Right side ignored entirely. CONFIRMED (sequence complete) feeds the shared RED/YELLOW/GREEN
+# confirmation tracker exactly as before. Values below are STARTING GUESSES, NOT calibrated — if
+# any key is later set back to null, is_waving stays False on every call (fail-closed); hand
+# detection/keypoints still run and are visualizable regardless of calibration state.
 gesture_hand_keypoint:
   # model_path: "modules/gesture_hand_keypoint/models/hand_landmarker.task"  # optional override
   confidence_threshold: 0.5                 # STARTING GUESS — MediaPipe handedness/detection confidence floor
@@ -199,25 +158,7 @@ gesture_hand_keypoint:
   palm_height_fraction: 0.5                 # STARTING GUESS — upper 50% of the person's bbox
   # Timeout between consecutive sequence transitions (spec: no partial credit past this gap).
   max_transition_gap_seconds: 1.5           # STARTING GUESS (spec suggests starting ~1-2s)
-  confirmation_duration_seconds: 1.0        # STARTING GUESS, independently tunable from Methods 1/3
-
-# Gesture Detection — Method 3, Trajectory Verifier (plans/04_gesture_trajectory_verifier.md).
-# Tracks wrist+elbow+shoulder for one arm at a time (both computed, best score wins), compares
-# via fixed-length TIME-BASED resampling (confirmed with the user, spec §2.3) + cosine similarity
-# against a small SHARED, GENERIC reference trajectory set (not per-person, spec §4). Reuses only
-# the MoveNet Lightning MODEL from Method 1 — no shared code/classes (spec §0.3).
-gesture_trajectory_verifier:
-  # movenet_tfhub_handle: "https://tfhub.dev/google/movenet/singlepose/lightning/4"  # optional override
-  # reference_dir: "modules/gesture_trajectory_verifier/reference_trajectories"       # optional override
-  confidence_threshold: 0.6           # TODO: calibrate (per-keypoint MoveNet confidence floor, all of wrist/elbow/shoulder must clear it)
-  trajectory_window_seconds: null      # TODO: calibrate, independently tunable from Method 1's motion_window_seconds
-  min_samples_for_comparison: 3     # TODO: calibrate
-  resample_length: 20                # TODO: calibrate (spec suggests starting ~20 points)
-  similarity_threshold: null           # TODO: calibrate (spec suggests starting ~0.7-0.85)
-  confirmation_duration_seconds: null  # TODO: calibrate, independently tunable from Methods 1/2
-  # Reference-set "not ready" floor (spec §4.3, confirmed with the user: 0 or 1 references both
-  # count as not-ready) is a fixed structural rule (MIN_REFERENCE_COUNT=2 in config.py), not a
-  # per-project calibration value — not a key here by design.
+  confirmation_duration_seconds: 1.0        # STARTING GUESS
 
 # Appearance Verifier — OSNet Re-ID (plans/05_appearance_verifier.md). Answers "does this crop
 # look like the same person as this reference set" — consumed by modules.target_tracking

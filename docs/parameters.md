@@ -46,33 +46,13 @@ is already measured every frame — use it to gather that benchmark first.
 
 ---
 
-## `wave_facing` (Method 1 — `modules.wave_facing_gate`)
-
-MoveNet Lightning wrist/elbow/shoulder geometry + motion. Currently holds 🟡 starting-guess
-values (spec's own suggested ranges) so it can be exercised end-to-end — **not calibrated**. If
-any key is set back to `null`, `is_waving`/`is_facing_camera` both stay `False`.
-
-| Parameter | Current | Status | Meaning | Tuning notes |
-|---|---|---|---|---|
-| `confidence_threshold_facing` | 0.3 | 🟡 | Min confidence on ALL of left_eye/right_eye/left_shoulder/right_shoulder before `is_facing_camera`'s raw check can pass. | Spec suggests 0.3–0.5. Raise if false "facing" triggers from partial occlusion; lower if a genuinely-facing person isn't detected. |
-| `confidence_threshold_pose` | 0.3 | 🟡 | Min confidence on wrist/elbow/shoulder before Gate A (static pose) evaluates at all — fails closed if below. | Same MoveNet confidence semantics as above; tune together. |
-| `wrist_height_fraction` | 0.5 | 🟡 | Wrist must be above (numerically less than) this fraction of bbox height to count as "raised." 0.5 = upper half. | Lower (e.g. 0.35) demands a higher raise; raise (e.g. 0.6) is more permissive. |
-| `verticality_threshold_deg` | 25 | 🟡 | Max degrees from vertical for BOTH the wrist→elbow and wrist→shoulder vectors — rejects a horizontally-extended arm. Spec range ~20–30°. | Tighten to reject more "reaching" false positives; loosen if genuine waves at an angle get rejected. |
-| `motion_window_seconds` | 1.2 | 🟡 | Rolling time window for the wrist-motion buffer (Gate B). Spec range ~1.0–1.5s. | Should roughly span one full wave cycle; too short truncates the gesture, too long dilutes it with stale motion. |
-| `motion_confidence_threshold` | 0.3 | 🟡 | Confidence floor for accumulating a wrist sample into the motion buffer — independent of `confidence_threshold_pose`, deliberately (Gate B accumulates regardless of Gate A's pass/fail). | Can diverge from `confidence_threshold_pose` if motion tracking needs a different reliability bar than the posture check. |
-| `motion_min_samples` | 5 | 🟡 | Minimum buffered samples before Gate B evaluates at all. | Depends on effective frame rate; needs enough samples to see multiple direction changes within `motion_window_seconds`. |
-| `motion_min_direction_changes` | 2 | 🟡 | Minimum direction reversals (angle ≥ `motion_direction_change_angle_deg` between consecutive displacement vectors) required to count as oscillating motion. | 2 is the minimum for "back and forth"; raise for stricter multi-cycle requirement. |
-| `motion_direction_change_angle_deg` | 90 | 🟡 | **Sensitivity knob #1.** How sharp a turn between consecutive wrist displacement vectors counts as a "direction change." | Lower = more sensitive to subtle direction shifts (more false positives from jitter); higher = only counts sharp reversals. |
-| `motion_min_displacement_px` | 8 | 🟡 **⚠️ unverified noise floor** | **Sensitivity knob #2, and the primary defense against false positives.** Minimum frame-to-frame wrist movement (pixels, in bbox coordinate space) before it's even considered for a direction-change comparison. Below this, movement is treated as MoveNet's own inference jitter, not real motion. | **Must be measured** from real held-still-raised-arm footage on target hardware *before* trusting this value — see the module spec §4.4/§11. Too low and a person holding a still raised arm (stretching, reaching) can register spurious direction changes from model jitter alone and false-trigger as waving. |
-| `confirmation_duration_seconds` | 1.0 | 🟡 | Seconds a raw per-frame condition must hold continuously (YELLOW) before promoting to GREEN/confirmed. Spec range ~1.0–2.0s. Applies independently to both `is_waving` and `is_facing_camera`. | Shorter = more responsive but more single-frame-flicker-prone; longer = steadier but feels less immediate. |
-| `movenet_tfhub_handle` | (TF Hub URL) | 🟢 | Where to load MoveNet Lightning from — auto-downloads and caches. | Override only to point at a local SavedModel. |
-
----
-
 ## `human_detection`
 
-Feeds per-person bboxes to `wave_facing` in the original (non-face-first) demo pipeline. Not
+Own standalone detector used internally by `target_tracking`/`target_recovery`. Not
 calibration-gated — no spec mandates it, and this is a generic detector, not a safety layer.
+(`wave_facing_gate`, the module this section used to also feed, was removed — see
+[`gesture_hand_keypoint`](#gesture_hand_keypoint-plans03--the-sole-trigger-gesture-method) below
+for the one TRIGGER gesture method left.)
 
 | Parameter | Current | Status | Meaning | Tuning notes |
 |---|---|---|---|---|
@@ -135,7 +115,11 @@ being too large mainly risks).
 
 ---
 
-## `gesture_hand_keypoint` (plans/03, Method 2)
+## `gesture_hand_keypoint` (plans/03) — the sole TRIGGER gesture method
+
+Two alternatives — `wave_facing` (`modules.wave_facing_gate`) and `gesture_trajectory_verifier`
+— used to exist; both were removed (confirmed with the user — this is the only TRIGGER gesture
+method left).
 
 **REDESIGNED — no longer motion-based.** Pure hand-shape sequence classification, MediaPipe
 landmark geometry only (no wrist motion, no trajectory, no arm geometry of any kind). Valid
@@ -175,13 +159,13 @@ CLOSED does **not** check the thumb at all.
 
 | Parameter | Current | Status | Meaning | Tuning notes |
 |---|---|---|---|---|
-| `confidence_threshold` | 0.5 | 🟡 | MediaPipe handedness/detection confidence floor. Below this, a hand is excluded from being the sequence-driving candidate this frame — doesn't advance, doesn't reset. | Independent from Method 1's confidence values — MediaPipe's confidence semantics don't transfer. |
+| `confidence_threshold` | 0.5 | 🟡 | MediaPipe handedness/detection confidence floor. Below this, a hand is excluded from being the sequence-driving candidate this frame — doesn't advance, doesn't reset. | MediaPipe's own confidence semantics — not comparable to any other module's confidence values. |
 | `min_fingers_extended_open` | 4 | 🟡 | Of the 4 NON-THUMB fingers, how many must be "extended" to count toward OPEN — the thumb is checked separately (must also pass `thumb_extension_ratio_threshold`). Integer 0–4. | Lower (e.g. 3) is more permissive if a fully-open reading proves too strict in practice. |
 | `min_fingers_curled_closed` | 4 | 🟡 | Of the 4 NON-THUMB fingers, how many must be "curled" to classify as CLOSED (fist). Integer 0–4. Thumb state is ignored entirely for CLOSED — see above. | Same tuning logic as above, mirrored for the fist side. |
 | `thumb_extension_ratio_threshold` | 0.6 | 🟡 **⚠️ unverified** | Thumb-specific test, only gates OPEN (not CLOSED): `distance(thumb_tip, pinky_MCP) / distance(wrist, middle_MCP)` must exceed this ratio to count as extended. | Watch the thumb's green/red coloring in `draw_debug()`'s output (drawn as a line from thumb tip to wrist) across real open-hand gestures to find the right cutoff — no need to tune it against fist footage since CLOSED ignores the thumb. |
 | `palm_height_fraction` | 0.5 | 🟡 | Palm (wrist landmark) must be in the upper fraction of the person's FULL-FRAME bbox height (from `modules.human_detection_roi`), checked on EVERY frame counted toward the sequence. Also acts as the selector for which hand drives the sequence when multiple hands are visible. | Lower (e.g. 0.3) demands the hand be raised higher; higher (e.g. 0.7) is more permissive. Remember: failing this is an immediate full sequence reset, not just a skipped frame — too strict a value will make the gesture hard to complete even with genuine intent. |
 | `max_transition_gap_seconds` | 1.5 | 🟡 | Timeout between consecutive sequence transitions — exceeding it resets to WAITING_OPEN with no partial credit. Spec suggests starting ~1–2s. | Shorter demands a snappier open-close-open-close; longer tolerates a slower, more deliberate gesture. No timeout pressure while still sitting in WAITING_OPEN (nothing to time from yet). |
-| `confirmation_duration_seconds` | 1.0 | 🟡 | RED→YELLOW→GREEN debounce duration, applied to the CONFIRMED completion event (see `pipeline.py`'s comments for exactly how a one-shot event is reconciled with the continuous-condition-style tracker — a judgment call, not literally specified). | Independently tunable from Methods 1 and 3. |
+| `confirmation_duration_seconds` | 1.0 | 🟡 | RED→YELLOW→GREEN debounce duration, applied to the CONFIRMED completion event (see `pipeline.py`'s comments for exactly how a one-shot event is reconciled with the continuous-condition-style tracker — a judgment call, not literally specified). | — |
 | `model_path` | 🟢 | `hand_landmarker.task` bundle location. | Override only if you moved the model file. |
 
 **How to tune the classification specifically:** run
@@ -196,30 +180,6 @@ CLOSED never triggers on a real fist, same diagnosis in the other direction.
 palm detector has shown degraded accuracy in low-light/low-resolution benchmarks in published
 literature. Test this method's calibration specifically under the campus's actual lighting
 conditions, not just good-lighting footage.
-
----
-
-## `gesture_trajectory_verifier` (plans/04, Method 3)
-
-Wrist+elbow+shoulder trajectory shape-matching against a shared reference set (time-based
-resampling + cosine similarity). Currently **partially** filled in — see status column.
-
-| Parameter | Current | Status | Meaning | Tuning notes |
-|---|---|---|---|---|
-| `confidence_threshold` | 0.6 | 🟡 | MoveNet per-keypoint confidence floor — ALL of wrist/elbow/shoulder must clear it before a sample is added to the trajectory buffer. | Independent from Method 1's MoveNet confidence values, even though it's the same underlying model. |
-| `trajectory_window_seconds` | `null` | 🔴 | Rolling window for the live trajectory buffer. | Independently tunable from Method 1's `motion_window_seconds` — don't assume the same span. |
-| `min_samples_for_comparison` | 8 | 🟡 | Minimum buffered samples (per arm) before a trajectory comparison is even attempted. | Needs enough points to make resampling to `resample_length` meaningful — should generally be ≥ half of `resample_length`. |
-| `resample_length` | 20 | 🟡 | Fixed number of points every trajectory (live and reference) is resampled to before comparison. Spec suggests starting ~20. | More points = finer shape fidelity but more sensitive to noise; fewer = smoother but coarser comparison. |
-| `similarity_threshold` | `null` | 🔴 | Cosine similarity floor the best-scoring reference must clear for a waving candidate. Spec suggests starting ~0.7–0.85. | Watch `confidence_debug` (the best score seen) across real waves vs. non-waves via the visualization tool before setting this. |
-| `confirmation_duration_seconds` | `null` | 🔴 | RED→YELLOW→GREEN debounce duration. | Independently tunable from Methods 1 and 2. |
-| `movenet_tfhub_handle` / `reference_dir` | 🟢 | Model source and reference-trajectory storage location. | Override only if relocating either. |
-
-**Fixed structural rule, not a config key by design:** the reference set needs **at least 2**
-entries before this module will attempt a real comparison at all (`MIN_REFERENCE_COUNT = 2` in
-`modules/gesture_trajectory_verifier/config.py`) — 0 or 1 both report a distinct "not ready"
-signal (`reference_count < 2` in the result) rather than a misleadingly-computed low score. Use
-`capture_reference_trajectory.py` to add reference waves; you need at least two before this
-method can produce anything but "not ready."
 
 ---
 
@@ -369,7 +329,7 @@ convention as every other module in this project).
 | `max_steering_angle_degrees` | `null` | 🔴 | Hard clamp on `SteeringController.update()`'s output — an Ackermann/servo hardware limit, NOT a tuning target. | Set from the actual servo/Ackermann mechanism's own datasheet limit, not empirically guessed. |
 
 **How to tune:** run
-`python -m modules.followme_orchestrator.visualize_followme_orchestrator --gesture-method <method> --mode camera`,
+`python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode camera`,
 trigger a follow episode, and watch the live `steering=` readout while adjusting `kp`/`ki`/`kd`
 in `config/thresholds.yaml` between runs — classic PID tuning order (`kp` first, then `ki`, then
 `kd`), against the real Ackermann hardware once available, not simulated/guessed values.

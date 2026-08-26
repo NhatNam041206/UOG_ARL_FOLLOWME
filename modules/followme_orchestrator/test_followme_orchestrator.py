@@ -4,7 +4,7 @@ modules.followme_orchestrator.interface (mirrors modules/face_identity/test_face
 runs the full composed pipeline against a video, printing FollowMeCommand per frame.
 
 Usage:
-    python -m modules.followme_orchestrator.test_followme_orchestrator <video_path> --gesture-method hand_keypoint
+    python -m modules.followme_orchestrator.test_followme_orchestrator <video_path>
 """
 import argparse
 import sys
@@ -18,12 +18,11 @@ from modules.followme_orchestrator.interface import configure, step
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the followme_orchestrator pipeline standalone against a recorded video.")
     parser.add_argument("video_path", help="Path to a recorded video file (e.g. an .mp4).")
-    parser.add_argument("--gesture-method", choices=["condition", "hand_keypoint", "trajectory_verifier"], required=True)
     parser.add_argument("--face-registry-dir", default="modules/face_identity/registry_data")
     parser.add_argument("--config", default="config/thresholds.yaml")
     args = parser.parse_args()
 
-    configure(args.gesture_method, thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
+    configure(thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
 
     cap = cv2.VideoCapture(args.video_path)
     if not cap.isOpened():

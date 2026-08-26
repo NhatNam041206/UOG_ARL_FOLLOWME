@@ -41,7 +41,3 @@ modules/autocar/data/*.npz
 # adapter always runs with THIS repo's root as CWD (not modules/autocar/), so it lands here,
 # at the top level, not inside the vendored tree. Session-only, gitignored in their own repo too.
 /temp_dataset/
-
-# Captured gesture reference trajectories (motion data, not biometric, but still per-user
-# runtime data rather than source).
-modules/gesture_trajectory_verifier/reference_trajectories/*.npz

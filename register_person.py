@@ -363,9 +363,10 @@ class RegistrationApp(tk.Tk):
         self.config_path = config_path
         self.front_roi, self.back_roi = _load_roi_config(config_path)
 
-        # can_follow_me: whether the caller (main.py) already has --gesture-method ready to go —
-        # "Follow Me" only ever hands a name back via self.chosen_name; it never starts the
-        # camera loop itself (that stays main.py's job, same seam --then-followme already uses).
+        # can_follow_me: whether the caller (main.py) can actually chain into followme mode after
+        # this app closes — "Follow Me" only ever hands a name back via self.chosen_name; it never
+        # starts the camera loop itself (that stays main.py's job, same seam --then-followme
+        # already uses). False only when this file is run standalone (see main() below).
         self.can_follow_me = can_follow_me
         self.chosen_name: Optional[str] = None
 
@@ -443,8 +444,9 @@ class RegistrationApp(tk.Tk):
             return
         if not self.can_follow_me:
             messagebox.showwarning(
-                "Follow Me", "No --gesture-method was given when this app was launched. Relaunch "
-                "with `python main.py --modules register --gesture-method <method>` to use this.",
+                "Follow Me", "This app was launched standalone (register_person.py directly), "
+                "which has no camera loop to chain into. Relaunch with "
+                "`python main.py --modules register` to use this.",
                 parent=self,
             )
             return
@@ -484,7 +486,7 @@ def main() -> int:
         return run(args.person_name, args.camera_index, args.front_samples, args.back_samples, args.config)
     # can_follow_me=False (default) when launched standalone — this file has no camera-loop
     # machinery of its own to hand a chosen person off to; "Follow Me" tells the operator to use
-    # `python main.py --modules register --gesture-method <method>` instead, which does.
+    # `python main.py --modules register` instead, which does.
     RegistrationApp(args.camera_index, args.front_samples, args.back_samples, args.config).mainloop()
     return 0
 

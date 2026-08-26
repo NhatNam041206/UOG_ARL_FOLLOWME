@@ -11,7 +11,8 @@ need to hand-wire seven modules together the way main.py's script code currently
 pre-trigger portion only.
 
     step(frame, timestamp):
-      NOT currently tracking -> face_identity -> human_detection_roi -> gesture method ->
+      NOT currently tracking -> face_identity -> human_detection_roi -> gesture_hand_keypoint
+        (the sole TRIGGER gesture method — two others were removed, confirmed with the user) ->
         is_waving GREEN? -> autocar_adapter.start(person_name, ...)
       currently tracking -> autocar_adapter.update(...) — its TargetLock folds tracking AND
         recovery into one state machine, so there is no separate recovery step here:
@@ -33,9 +34,7 @@ Manages a SINGLE active follow-me episode — mirrors autocar_adapter's own sing
 (itself a module-level singleton; this orchestrator can only ever follow one registered person at
 a time by construction, the same as that adapter).
 
-`configure(gesture_method=...)` MUST be called before the first step() — unlike every other
-module's configure(), there is no sensible default gesture method to lazily initialize with
-(mirrors main.py's own --gesture-method being a required flag for --modules face_first).
+`configure(...)` MUST be called before the first step() — see its own docstring below.
 """
 import math
 from dataclasses import dataclass
@@ -68,32 +67,25 @@ class FollowMeCommand:
 _pipeline_singleton: Optional[FollowMeOrchestratorPipeline] = None
 
 
-def configure(gesture_method: str, thresholds_config_path: str = "config/thresholds.yaml",
+def configure(thresholds_config_path: str = "config/thresholds.yaml",
               face_registry_dir: str = "modules/face_identity/registry_data") -> None:
     """
     REQUIRED before the first step() call — (re)initializes the module-level orchestrator.
-    `gesture_method`: "condition" (Method 1) | "hand_keypoint" (Method 2) |
-    "trajectory_verifier" (Method 3), same choices as main.py's --gesture-method.
 
-    Eagerly loads EVERY model this pipeline will use (face_identity, human_detection_roi, the
-    chosen gesture method, and autocar_adapter's YOLO-pose+OSNet) before returning — see
+    Eagerly loads EVERY model this pipeline will use (face_identity, human_detection_roi,
+    gesture_hand_keypoint, and autocar_adapter's YOLO-pose+OSNet) before returning — see
     FollowMeOrchestratorPipeline.__init__ — so none of them cold-start later during step(), and
     in particular never at the exact moment a gesture trigger fires. This call itself may
     therefore take several seconds; that's the intended trade — paid once, here, not live.
     """
     global _pipeline_singleton
     config: FollowMeOrchestratorConfig = load_config(thresholds_config_path)
-    _pipeline_singleton = FollowMeOrchestratorPipeline(
-        config, gesture_method, face_registry_dir, thresholds_config_path,
-    )
+    _pipeline_singleton = FollowMeOrchestratorPipeline(config, face_registry_dir, thresholds_config_path)
 
 
 def _get_pipeline() -> FollowMeOrchestratorPipeline:
     if _pipeline_singleton is None:
-        raise RuntimeError(
-            "modules.followme_orchestrator: configure(gesture_method=...) must be called before "
-            "step() — there is no sensible default gesture method to lazily initialize with."
-        )
+        raise RuntimeError("modules.followme_orchestrator: configure(...) must be called before step().")
     return _pipeline_singleton
 
 

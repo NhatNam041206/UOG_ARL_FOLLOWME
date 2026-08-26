@@ -11,11 +11,10 @@ The codebase is organized as independent, self-contained **modules** (`modules/<
 owning its own model instance(s) and state. Two things compose across module boundaries:
 [`main.py`](../main.py), the CLI entry point, and `modules/followme_orchestrator/`, the one
 module explicitly permitted to do the same thing as a reusable, importable component (see design
-rule #2 below for the documented exception). `main.py` can run three unrelated pipelines, chosen
-by `--modules`:
+rule #2 below for the documented exception). `main.py` can run two per-frame pipelines (plus a
+non-per-frame `register` mode — see [Entry point](#entry-point-mainpy) below), chosen by
+`--modules`:
 
-- **Legacy pipeline** (`estop` / `wave_facing` / `both`) — the original whole-frame demo: detect
-  every person in frame, evaluate wave+facing for each. No identity check.
 - **`pretrigger`** — the face-first exploratory pipeline `plans/01-04` describe: find one
   *registered* person by face first, then scope everything downstream to them, **stopping at**
   `TRIGGER = is_waving`. Exists for calibrating/testing the pre-trigger stages in isolation
@@ -28,8 +27,10 @@ by `--modules`:
   design rule #2's isolation exception, and [§ Post-trigger
   flow](#post-trigger-flow-tracking-recovery--steering-plans05-08) below).
 
-All three are independent of `emergency_stop`, which is a separate safety layer that can run
-alongside the legacy pipeline (`--modules both` runs `estop` + `wave_facing` on the same frame).
+Both use `modules.gesture_hand_keypoint` as the TRIGGER gesture method — the only one left after
+two alternatives (`modules.wave_facing_gate`, `modules.gesture_trajectory_verifier`) were removed
+(confirmed with the user). Both are independent of `emergency_stop`, a separate safety layer
+(no longer composed into either pipeline — see [`modules.md`](modules.md#emergency_stop)).
 
 ## Repository layout
 
@@ -46,11 +47,11 @@ modules/
   emergency_stop/                Collision-avoidance safety layer (runway + 3-zone STOP logic)
   human_detection/                Whole-frame person detector + ByteTrack (also used standalone by
                                    register_person.py to gate the BACK capture phase)
-  wave_facing_gate/               Gesture Method 1: MoveNet pose geometry + motion (+ facing-camera gate)
   face_identity/                  Face detect + match against a registered-person database
   human_detection_roi/            ROI-scoped body detector, triggered by a matched face
-  gesture_hand_keypoint/          Gesture Method 2: MediaPipe hand-shape sequence classifier
-  gesture_trajectory_verifier/    Gesture Method 3: MoveNet wrist/elbow/shoulder trajectory matching
+  gesture_hand_keypoint/          The TRIGGER gesture method: MediaPipe hand-shape sequence
+                                   classifier (two alternatives, wave_facing_gate and
+                                   gesture_trajectory_verifier, were removed)
   appearance_verifier/            OSNet Re-ID (shared dependency of target_tracking + target_recovery,
                                    both superseded — see Post-trigger flow below)
   target_tracking/                SUPERSEDED by autocar_adapter (below) — kept until the
@@ -108,21 +109,13 @@ clone — not even a new file is ever added there, only read from via `autocar_b
 `sys.path` bridge (the same technique their own `scripts/enroll_person.py` uses to reach its own
 sibling packages).
 
-**3. The three gesture methods share no code.** `wave_facing_gate` (Method 1),
-`gesture_hand_keypoint` (Method 2), and `gesture_trajectory_verifier` (Method 3) are
-interchangeable alternatives for the same job (`--gesture-method`) and are independently
-implemented end to end — including structurally identical pieces like the RED/YELLOW/GREEN
-confirmation debounce, which exists as three separate, near-identical `ConfirmationTracker`
-classes rather than one shared import. Only the underlying *models* may be reused (Methods 1 and
-3 both use MoveNet Lightning) — never code operating on them.
-
-**4. RED → YELLOW → GREEN confirmation debounce.** A single passing frame is never enough to
+**3. RED → YELLOW → GREEN confirmation debounce.** A single passing frame is never enough to
 trigger anything. Every gated boolean signal in this project (`is_waving`, `is_facing_camera`,
 gesture-method completion) is debounced through the same state machine: RED (failing) →
 YELLOW (started passing, timing) → GREEN (passed continuously for `confirmation_duration_seconds`)
 → back to RED instantly on any interruption, no partial credit. Only `GREEN` maps to `True`.
 
-**5. Full-frame vs. crop-local pixel space, always explicit.** A person crop is a `numpy` view
+**4. Full-frame vs. crop-local pixel space, always explicit.** A person crop is a `numpy` view
 into the full frame (`frame[y:y+h, x:x+w]`) — drawing on it mutates `frame` in place, which is
 how debug overlays composite. But landmark coordinates from a model run *on that crop* come back
 in crop-local pixels, and some gates (the hand-keypoint module's palm-height gate) need to
@@ -130,7 +123,7 @@ compare against the person's position in the *full frame*. Every module that nee
 conversion explicitly via its own small `BboxContext`-style helper — never assumes crop-local
 and full-frame are interchangeable.
 
-**6. Stateless where the coordinate frame can't support state.** `human_detection_roi` derives a
+**5. Stateless where the coordinate frame can't support state.** `human_detection_roi` derives a
 new ROI crop from the matched face's *current* position every single frame — that crop shifts
 constantly, which is not a stable coordinate frame for a tracker's motion model (ByteTrack-style
 persistence). So it deliberately stays a stateless, single-frame `.predict()` call, keyed by
@@ -159,7 +152,7 @@ flowchart TD
 | 1. Face detect + match | [`face_identity.evaluate(frame, registry)`](../modules/face_identity/interface.py) | full BGR frame, `FaceRegistry` | `List[FaceIdentityResult]` — zero, one, or many faces; caller filters to `is_registered_match` |
 | 2. ROI-scoped body detection | [`human_detection_roi.evaluate(frame, face_bbox)`](../modules/human_detection_roi/interface.py) | full frame + the matched face's bbox | `HumanDetectionResult(person_found, person_bbox, detection_confidence)` |
 | 3. Crop | — | `person_bbox` | `crop = frame[py:py+ph, px:px+pw]` (a view — drawing on it writes through to `frame`) |
-| 4. Gesture method (`--gesture-method`) | one of three interchangeable modules, via `_GestureMethodAdapter` in `main.py` | crop + full-frame person bbox + `track_id = hash(matched_person_name)` | `(is_waving, waving_state, extra_debug)` |
+| 4. Gesture method | `gesture_hand_keypoint`, via `_GestureMethodAdapter` in `main.py` | crop + full-frame person bbox + `track_id = hash(matched_person_name)` | `(is_waving, waving_state, extra_debug)` |
 | 5. Trigger | — | `is_waving` | `TRIGGER = is_waving` (identity already confirmed in stage 1) |
 
 Human detection never runs on its own in this pipeline — it only ever fires once a face has
@@ -174,8 +167,8 @@ composed into one steppable pipeline by `modules/followme_orchestrator/` (`plans
 isolation exception noted in design rule #2 above). `main.py --modules followme` is a thin
 wrapper around that composed pipeline; `main.py --modules pretrigger` still stops at the trigger,
 for calibrating the pre-trigger stages in isolation. To exercise the FULL flow, either
-`python main.py --gesture-method <method> --show` (via the registration UI's "Follow Me" button,
-or `--modules followme` directly) or
+`python main.py --show` (via the registration UI's "Follow Me" button, or `--modules followme`
+directly) or
 `python -m modules.followme_orchestrator.visualize_followme_orchestrator` (the latter has a
 richer debug overlay) — see [`commands.md`](commands.md).
 
@@ -229,8 +222,8 @@ flowchart TD
   independent of `--debug`.
 
 `followme_orchestrator.configure()` eagerly loads EVERY model the pipeline will use —
-`face_identity` (YuNet+EdgeFace), `human_detection_roi` (YOLO), the chosen gesture method
-(MoveNet/MediaPipe), and `autocar_adapter` (YOLO-pose+OSNet, plus one throwaway inference through
+`face_identity` (YuNet+EdgeFace), `human_detection_roi` (YOLO), `gesture_hand_keypoint`
+(MediaPipe), and `autocar_adapter` (YOLO-pose+OSNet, plus one throwaway inference through
 each to absorb first-inference backend overhead too) — before it returns (confirmed with the
 user: ~3.4s once, at startup, measured end to end). Previously several of these constructed
 lazily on first real use; `autocar_adapter`'s detector/embedder in particular only used to build
@@ -303,21 +296,23 @@ it.
 
 ```
 python main.py
-    # --modules defaults to "register" — opens the Tkinter registration UI (see above)
-python main.py --gesture-method hand_keypoint --show
-    # same, but the UI's "Follow Me" button can now hand off into followme mode
-python main.py --mode camera --modules pretrigger --gesture-method hand_keypoint --show --debug
-python main.py --mode camera --modules followme --gesture-method hand_keypoint --show
-python main.py --mode video --video path.mp4 --modules followme --gesture-method trajectory_verifier --show
-python main.py --modules register --person-name Nam --then-followme --gesture-method hand_keypoint --show
+    # --modules defaults to "register" — opens the Tkinter registration UI (see above),
+    # "Follow Me" works out of the box, no extra flag needed
+python main.py --mode camera --modules pretrigger --show --debug
+python main.py --mode camera --modules followme --show
+python main.py --mode video --video path.mp4 --modules followme --show
+python main.py --modules register --person-name Nam --then-followme --show
 ```
+
+Both `pretrigger` and `followme` use `modules.gesture_hand_keypoint` as the TRIGGER gesture
+method — the only one left after two alternatives (`--gesture-method condition`/`wave_facing_gate`
+and `trajectory_verifier`/`gesture_trajectory_verifier`) were removed (confirmed with the user).
 
 | Flag | Meaning |
 |---|---|
 | `--mode camera \| video` | Live webcam vs. a recorded file (`--video` required for the latter); required for `pretrigger`/`followme`, ignored/not required for `register` |
 | `--camera-index N` | OS camera device index; defaults to `config/thresholds.yaml`'s `camera.camera_index`, else `0` |
 | `--modules` | `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) \| `register` (**default**) — hands off to `register_person`, not a per-frame pipeline |
-| `--gesture-method` | `condition` (Method 1) \| `hand_keypoint` (Method 2) \| `trajectory_verifier` (Method 3) — required for `pretrigger`/`followme`; only required for `register` if you intend to use `--then-followme` or the UI's "Follow Me" button |
 | `--face-registry-dir` | Path to registered-person `.npz` files (`pretrigger`/`followme` only) |
 | `--config` | Path to `thresholds.yaml` — passed to `followme_orchestrator.configure()` (`followme`) or `register_person.run()` (`register`) |
 | `--person-name` | `register` only: headless single-person registration, no UI. Omit to open the Tkinter UI instead. |
@@ -349,10 +344,10 @@ onto:
 
 1. **Module-level overlay** (gated by `--debug`, on top of `--show`) — each phase's own
    `draw_debug()`, called in sequence:
-   - `pretrigger`: `main.py` calls `face.draw_debug()`, `person.draw_debug()`, then the active
-     gesture method's `draw_debug()` (via `_GestureMethodAdapter.draw_debug()`) — face bbox, ROI
-     region, person bbox, keypoints/skeleton, gate state, and (Method 2 only) the palm-height
-     threshold line and shape-classification coloring.
+   - `pretrigger`: `main.py` calls `face.draw_debug()`, `person.draw_debug()`, then
+     `gesture_hand_keypoint`'s `draw_debug()` (via `_GestureMethodAdapter.draw_debug()`) — face
+     bbox, ROI region, person bbox, hand keypoints/skeleton, sequence state, the palm-height
+     threshold line, and shape-classification coloring.
    - `followme`: `main.py` calls a single `modules.followme_orchestrator.draw_debug(frame)`,
      which internally calls each composed module's `draw_debug()` in turn (the same isolation
      exception that lets it compose their `evaluate()`/`step()` calls) — everything `pretrigger`
@@ -369,11 +364,9 @@ debugging without the rest of the pipeline:
 |---|---|
 | `emergency_stop` | `modules/emergency_stop/test_estop.py` |
 | `human_detection` | `modules/human_detection/test_human_detection.py` |
-| `wave_facing_gate` | `modules/wave_facing_gate/test_wave_facing.py` |
 | `face_identity` | `modules/face_identity/{test_face_identity,visualize_face_identity}.py` |
 | `human_detection_roi` | `modules/human_detection_roi/{test_human_detection_roi,visualize_human_detection_roi}.py` |
-| `gesture_hand_keypoint` | `modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,visualize_gesture_hand_keypoint}.py` |
-| `gesture_trajectory_verifier` | `modules/gesture_trajectory_verifier/{test_gesture_trajectory_verifier,visualize_gesture_trajectory_verifier}.py` |
+| `gesture_hand_keypoint` (the TRIGGER gesture method) | `modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,visualize_gesture_hand_keypoint}.py` |
 | `appearance_verifier` | `modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
 | `target_tracking` | `modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py` — SUPERSEDED, same status |
 | `target_recovery` | `modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py` — SUPERSEDED, same status |
