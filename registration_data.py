@@ -13,9 +13,19 @@ Capture is split into two persisted, inspectable phases (confirmed with the user
                   can open and look at — this exists specifically so the ROI crop can be visually
                   checked BEFORE anything downstream (detection, embedding) ever runs on it.
 
-Both npz-building functions read from the CROPPED folder, never the raw one directly — detection
-still only ever happens in the data-building phase (build_face_registry / build_target_profile),
-on the cropped images, same "detection happens after capture, never during" design as before.
+Both npz-building functions read from the CROPPED folder, never the raw one directly — IDENTITY
+detection (face detection for the face registry, pose/person detection + face/back-of-head
+classification for the re-id profile) still only ever happens in the data-building phase
+(build_face_registry / build_target_profile), on the cropped images, same "detection happens after
+capture, never during" design as before.
+
+The one exception is LiveSubjectDetector below — a live person-COUNT check (not identity) that
+register_person.py runs during capture itself, to enforce "exactly one person in the ROI" before
+accepting a raw frame at all. It answers "how many candidate subjects are in view", never "who is
+this" — no face detection, no embeddings, nothing that identity detection does. Confirmed with the
+user: the multi-person gap this closes (build_target_profile silently picking the largest bbox on
+a frame that had more than one person in it) matters more right now than the two-image capture/
+build split staying perfectly detection-free.
 
 CRUD mapping:
     Create -> save_raw_capture() during a live session, then build_cropped_roi() once it ends
@@ -57,6 +67,35 @@ class PersonStatus:
     @property
     def ready_for_followme(self) -> bool:
         return self.has_face_registry and self.has_target_profile
+
+
+class LiveSubjectDetector:
+    """Live "how many people are in the ROI right now" check for register_person.py's capture
+    loop — own instance, constructed ONCE per capture session (model load is not free; do not
+    construct this per frame), then called once per throttled tick.
+
+    Wraps the vendored pose detector via autocar_bootstrap, same bridge build_target_profile()
+    already uses — modules/autocar/ itself is never touched. This is a person-COUNT check only:
+    it runs the pose detector and counts how many detections have a bbox center inside the given
+    ROI, mirroring modules/autocar/scripts/enroll_person.py's own live `_bbox_center_in_roi` gate
+    exactly. It does not run face detection and produces no embeddings — that still happens only
+    in build_target_profile/build_face_registry, on the CROPPED images, once capture is over."""
+
+    def __init__(self):
+        autocar_bootstrap.ensure_on_path()
+        from detector.yolov8_pose_torch import YOLOv8PoseTorch  # noqa: E402
+        self._detector = YOLOv8PoseTorch()
+
+    def count_in_roi(self, frame: np.ndarray, roi_percent) -> int:
+        frame_h, frame_w = frame.shape[:2]
+        x1, y1, x2, y2 = overlay.roi_to_px(roi_percent, frame_w, frame_h)
+        count = 0
+        for det in self._detector.detect(frame):
+            bx1, by1, bx2, by2 = det.bbox
+            cx, cy = (bx1 + bx2) / 2.0, (by1 + by2) / 2.0
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                count += 1
+        return count
 
 
 def _raw_dir(name: str, phase: str) -> str:

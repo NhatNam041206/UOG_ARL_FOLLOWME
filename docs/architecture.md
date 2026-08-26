@@ -257,7 +257,7 @@ MVC-style design, applied here for the first time in this project):
 
 ```mermaid
 flowchart LR
-    L1["registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL detection happens here"]
+    L1["registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL identity detection happens here"]
     L2["registration_overlay.py\nLayer 2 — pure frame-in/image-out\ndrawing + the ROI crop, zero I/O"]
     L3["register_person.py\nLayer 3 — the ONLY file that reads\na camera, opens a window, or reads input"]
     L3 -->|calls| L1
@@ -265,14 +265,22 @@ flowchart LR
 ```
 
 Capture is split into two persisted, inspectable phases, not one — **RAW** (the exact camera
-frame, no cropping, no detection) then **CROPPED** (`registration_data.build_cropped_roi()`
-reads the RAW files back and crops each to the operator-configured ROI, saving the result as its
-own file you can open and check before anything downstream ever runs on it). The Tkinter flow
-(`CaptureWindow`) genuinely pauses after cropping with an OK/Cancel dialog for exactly this
-reason. ALL detection — face detection for the face registry, pose/person detection for the re-id
-profile (picking the LARGEST bbox in each cropped image, then splitting head/lower) — happens
-only in the third phase, `registration_data.build_face_registry()`/`build_target_profile()`,
-reading the CROPPED images, never live during capture.
+frame, no cropping) then **CROPPED** (`registration_data.build_cropped_roi()` reads the RAW files
+back and crops each to the operator-configured ROI, saving the result as its own file you can open
+and check before anything downstream ever runs on it). The Tkinter flow (`CaptureWindow`)
+genuinely pauses after cropping with an OK/Cancel dialog for exactly this reason. ALL IDENTITY
+detection — face detection for the face registry, pose/person detection for the re-id profile
+(picking the LARGEST bbox in each cropped image, then splitting head/lower) — happens only in the
+third phase, `registration_data.build_face_registry()`/`build_target_profile()`, reading the
+CROPPED images, never live during capture.
+
+RAW capture itself does run one lightweight, non-identity check live: `registration_data.
+LiveSubjectDetector` counts how many people have a bbox center inside the ROI each throttled tick
+(mirroring `modules/autocar/scripts/enroll_person.py`'s own live per-frame gate) — a frame is only
+accepted and saved when that count is exactly 1, and the ROI box is drawn green/yellow to match
+(accepted/rejected). This closes a gap the max-bbox pick in `build_target_profile()` couldn't:
+without it, a second person passing through the ROI during capture could get silently embedded if
+their bbox happened to be larger than the actual subject's.
 
 FRONT feeds both consumers (face registry + the re-id profile's front-head/lower-body
 embeddings); BACK feeds only the re-id profile's back-of-head embedding. A fresh session

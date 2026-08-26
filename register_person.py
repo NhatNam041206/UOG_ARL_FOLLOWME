@@ -31,19 +31,28 @@ alike — starts by deleting that person's existing RAW and CROPPED photos first
 already-BUILT registry files are left alone until a rebuild actually SUCCEEDS at the end, so a
 session that fails partway never destroys the last known-good profile.
 
-Capture itself runs NO detection or cropping at all — every RAW frame is saved exactly as the
-camera produced it (registration_data.save_raw_capture()); the ROI box is only drawn on screen so
-the operator can see where to stand, never applied to the saved file. Once a phase's raw capture
-finishes, registration_data.build_cropped_roi() reads those RAW files back and crops each one to
-the configured ROI (config/thresholds.yaml's register_person: section), saving the result as its
-own separate, inspectable file — a real on-disk artifact under registration_captures/<name>/cropped/
-you can open and check BEFORE anything downstream ever runs on it (confirmed with the user; the
-Tkinter flow pauses here for exactly that reason — see CaptureWindow's "cropping" state below).
-ALL detection — face detection for the face registry, pose/person detection for the re-id profile
-(picking the LARGEST bbox in frame, then splitting head/lower) — happens afterward, entirely
-inside the "data building" phase (registration_data.build_face_registry / build_target_profile),
-reading the CROPPED images, never the raw ones. Three phases in order: RAW capture -> CROPPED ROI
--> data building; detection only ever runs in the third.
+Capture itself runs NO cropping and no IDENTITY detection at all — every RAW frame is saved
+exactly as the camera produced it (registration_data.save_raw_capture()); the ROI box is only
+drawn on screen so the operator can see where to stand, never applied to the saved file. It DOES
+run one live, lightweight check while capturing: registration_data.LiveSubjectDetector counts how
+many people have a bbox center inside the ROI this tick, and a frame is only accepted (saved) when
+that count is exactly 1 — the ROI box is drawn green when accepted, yellow when 0 or 2+ people are
+in view (confirmed with the user: closes the gap where a second/extra person in frame could
+silently corrupt a sample). This is a person-COUNT check only, not identity — no face detection,
+no embeddings computed here.
+
+Once a phase's raw capture finishes, registration_data.build_cropped_roi() reads those RAW files
+back and crops each one to the configured ROI (config/thresholds.yaml's register_person: section),
+saving the result as its own separate, inspectable file — a real on-disk artifact under
+registration_captures/<name>/cropped/ you can open and check BEFORE anything downstream ever runs
+on it (confirmed with the user; the Tkinter flow pauses here for exactly that reason — see
+CaptureWindow's "cropping" state below).
+ALL IDENTITY detection — face detection for the face registry, pose/person detection for the re-id
+profile (picking the LARGEST bbox in frame, then splitting head/lower) — happens afterward,
+entirely inside the "data building" phase (registration_data.build_face_registry /
+build_target_profile), reading the CROPPED images, never the raw ones. Three phases in order: RAW
+capture (gated by a live person-count check) -> CROPPED ROI -> data building; identity detection
+only ever runs in the third.
 
 FRONT feeds both consumers (face registry + the re-id profile's front-head/lower-body
 embeddings); BACK feeds only the re-id profile's back-of-head embedding. Once both registry files
@@ -68,6 +77,9 @@ from modules.face_identity.registry import sanitize_person_name
 
 _CAPTURE_INTERVAL_SECONDS = 1.0  # gap between accepted samples, so they're not near-duplicate frames
 _COUNTDOWN_SECONDS = 3.0
+_PERSON_CHECK_INTERVAL_SECONDS = 0.2  # live person-count check cadence — throttled below the tick
+# rate so the pose detector doesn't stutter the live preview (mirrors modules/autocar's own
+# ENROLL_SAMPLE_INTERVAL_FRAMES-based throttling of its live per-frame checks)
 _WINDOW_NAME = "register_person"  # cv2 window title, used only by the headless run() path below
 
 
@@ -83,7 +95,8 @@ def _load_roi_config(config_path: str):
 # Headless CLI path — used by main.py (--modules register) and this file's own `<name>` argv form.
 # --------------------------------------------------------------------------------------------
 
-def _capture_phase_cli(cap, roi_percent, instruction: str, name: str, phase: str, samples_needed: int) -> int:
+def _capture_phase_cli(cap, detector: data.LiveSubjectDetector, roi_percent, instruction: str,
+                        name: str, phase: str, samples_needed: int) -> int:
     start = time.time()
     while time.time() - start < _COUNTDOWN_SECONDS:
         ret, frame = cap.read()
@@ -95,18 +108,22 @@ def _capture_phase_cli(cap, roi_percent, instruction: str, name: str, phase: str
             print("Stopped early.")
             return 0
 
-    saved, last_time = 0, 0.0
+    saved, last_save_time, last_check_time, person_count = 0, 0.0, 0.0, 0
     while saved < samples_needed:
         ret, frame = cap.read()
         if not ret:
             break
         now = time.time()
-        if (now - last_time) >= _CAPTURE_INTERVAL_SECONDS:
+        if (now - last_check_time) >= _PERSON_CHECK_INTERVAL_SECONDS:
+            person_count = detector.count_in_roi(frame, roi_percent)
+            last_check_time = now
+        if person_count == 1 and (now - last_save_time) >= _CAPTURE_INTERVAL_SECONDS:
             path = data.save_raw_capture(name, phase, frame)  # RAW — see module docstring
             saved += 1
-            last_time = now
+            last_save_time = now
             print(f"  saved '{path}' ({saved}/{samples_needed})")
-        cv2.imshow(_WINDOW_NAME, overlay.draw_capture(frame, roi_percent, instruction, saved, samples_needed))
+        cv2.imshow(_WINDOW_NAME, overlay.draw_capture(
+            frame, roi_percent, instruction, saved, samples_needed, person_count))
         if cv2.waitKey(1) & 0xFF == ord("q"):
             print("Stopped early.")
             break
@@ -131,15 +148,18 @@ def run(person_name: str, camera_index: int = 0, front_samples: int = 15,
         print(f"ERROR: could not open camera index {camera_index}", file=sys.stderr)
         return 1
 
+    print("Loading person detector (live single-person check)...")
+    detector = data.LiveSubjectDetector()
+
     try:
         print(f"FRONT: face the camera, stand inside the box. Need {front_samples} samples — 'q' to stop early.")
-        if _capture_phase_cli(cap, front_roi, "FACE THE CAMERA", person_name, "front", front_samples) == 0:
+        if _capture_phase_cli(cap, detector, front_roi, "FACE THE CAMERA", person_name, "front", front_samples) == 0:
             print("ERROR: no FRONT samples captured.", file=sys.stderr)
             return 1
         print("Phase 1/2 done.")
 
         print(f"BACK: turn around, stand inside the box. Need {back_samples} samples — 'q' to stop early.")
-        if _capture_phase_cli(cap, back_roi, "TURN AROUND - BACK TO CAMERA", person_name, "back", back_samples) == 0:
+        if _capture_phase_cli(cap, detector, back_roi, "TURN AROUND - BACK TO CAMERA", person_name, "back", back_samples) == 0:
             print("ERROR: no BACK samples captured.", file=sys.stderr)
             return 1
         print("Phase 2/2 done.")
@@ -167,10 +187,12 @@ def run(person_name: str, camera_index: int = 0, front_samples: int = 15,
 
 class CaptureWindow(tk.Toplevel):
     """One capture session for one person: countdown -> RAW front -> countdown -> RAW back ->
-    CROP both phases -> pause for the operator to check the crops -> build. Detection-free
-    throughout capture (see module docstring) — each tick just saves the live frame AS-IS via
-    registration_data.save_raw_capture(); cropping (registration_data.build_cropped_roi()) and
-    all detection (registration_data.rebuild_registries()) both happen only after capture ends."""
+    CROP both phases -> pause for the operator to check the crops -> build. No IDENTITY detection
+    during capture (see module docstring) — each accepted tick just saves the live frame AS-IS via
+    registration_data.save_raw_capture(); cropping (registration_data.build_cropped_roi()) and all
+    identity detection (registration_data.rebuild_registries()) both happen only after capture
+    ends. Capture ticks DO run a live person-COUNT check (self.detector) that gates which frames
+    get accepted — see _tick()'s capture_front/capture_back branch."""
 
     def __init__(self, parent, name: str, camera_index: int, front_samples: int, back_samples: int,
                  front_roi, back_roi, config_path: str, on_done):
@@ -200,10 +222,16 @@ class CaptureWindow(tk.Toplevel):
 
         data.reset_captures(name)  # "remove the old ones" — see register_person.py's module docstring
 
+        self.status_label.configure(text="Loading person detector...")
+        self.update_idletasks()
+        self.detector = data.LiveSubjectDetector()
+
         self._state = "countdown_front"
         self._state_start = time.time()
         self._saved = 0
         self._last_save_time = 0.0
+        self._person_count = 0
+        self._last_check_time = 0.0
         self.after(0, self._tick)
 
     def _cancel(self):
@@ -244,6 +272,7 @@ class CaptureWindow(tk.Toplevel):
             if remaining <= 0:
                 self._state = "capture_front" if self._state == "countdown_front" else "capture_back"
                 self._saved, self._last_save_time = 0, 0.0
+                self._person_count, self._last_check_time = 0, 0.0
             else:
                 self._show(overlay.draw_countdown(frame, roi, instruction, remaining))
                 self.status_label.configure(text=f"{instruction} — starting in {remaining:.1f}s")
@@ -255,13 +284,18 @@ class CaptureWindow(tk.Toplevel):
             needed = self.front_samples if phase == "front" else self.back_samples
 
             now = time.time()
-            if (now - self._last_save_time) >= _CAPTURE_INTERVAL_SECONDS:
+            if (now - self._last_check_time) >= _PERSON_CHECK_INTERVAL_SECONDS:
+                self._person_count = self.detector.count_in_roi(frame, roi)
+                self._last_check_time = now
+
+            if self._person_count == 1 and (now - self._last_save_time) >= _CAPTURE_INTERVAL_SECONDS:
                 data.save_raw_capture(self.name, phase, frame)  # RAW — see class docstring
                 self._saved += 1
                 self._last_save_time = now
 
-            self._show(overlay.draw_capture(frame, roi, instruction, self._saved, needed))
-            self.status_label.configure(text=f"{instruction} — {self._saved}/{needed}")
+            self._show(overlay.draw_capture(frame, roi, instruction, self._saved, needed, self._person_count))
+            status_suffix = "ACCEPTED" if self._person_count == 1 else f"REJECTED ({self._person_count} in frame)"
+            self.status_label.configure(text=f"{instruction} — {self._saved}/{needed} — {status_suffix}")
 
             if self._saved >= needed:
                 if phase == "front":

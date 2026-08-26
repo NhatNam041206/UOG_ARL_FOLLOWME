@@ -90,6 +90,11 @@ Tkinter flow pauses after cropping so you can check the crops before continuing.
 `modules/face_identity/registry_data/<name>.npz` (face match) and
 `modules/autocar/models/enrolled_<name>.npz` (re-id profile) from the same session.
 
+While capturing, a live person-count check (`registration_data.LiveSubjectDetector`) only accepts
+a frame when exactly 1 person is inside the ROI — the box shows green when accepted, yellow when
+0 or 2+ people are in view. Person-count only, not identity — face/pose identity detection still
+happens later, only during the build step, on the cropped images.
+
 Requires `modules/autocar/models/osnet_x1_0_msmt17.onnx` to exist — see
 [`technologies.md`](technologies.md) for how it's obtained (not part of the vendored repo).
 
