@@ -20,7 +20,7 @@ from .confirmation import ConfirmationTracker, GREEN
 from .hand_shape import classify_hand_shape
 from .hand_detector import HandLandmarkerWrapper
 from .palm_orientation import palm_facing_camera_debug
-from .sequence_state_machine import CONFIRMED, SequenceStateMachine, WAITING_OPEN
+from .sequence_state_machine import CONFIRMED, STAGE_COUNTS, SequenceStateMachine, WAITING_OPEN
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,9 @@ class PipelineResult(NamedTuple):
     is_waving: bool
     waving_state: str
     sequence_stage: str
+    open_count: int                     # opens consumed so far in the CURRENT attempt (0-2)
+    close_count: int                    # closes consumed so far in the CURRENT attempt (0-2)
+    total_confirmed_count: int          # cumulative CONFIRMED pulses for this track_id, session lifetime
     confidence_debug: Optional[float]
     palm_facing_camera_debug: Optional[bool]
     hands_raw: Optional[object]
@@ -50,6 +53,9 @@ class _TrackState:
     # Once any hand's sequence reaches CONFIRMED, we hold a "True" pulse into waving_tracker
     # until this timestamp — see the long comment in evaluate() below for why.
     confirmed_hold_until: Optional[float] = None
+    # Cumulative CONFIRMED count for this track_id, session lifetime — debug/logging only, never
+    # gates anything. Reset only by release_track() (a fresh track_id), never by a sequence reset.
+    total_confirmed_count: int = 0
 
 
 class GestureHandKeypointPipeline:
@@ -77,7 +83,8 @@ class GestureHandKeypointPipeline:
 
         if person_crop_bgr is None or getattr(person_crop_bgr, "size", 0) == 0:
             waving_state = state.waving_tracker.update(False, timestamp, self.config)
-            return PipelineResult(track_id, False, waving_state, WAITING_OPEN, None, None, None)
+            return PipelineResult(track_id, False, waving_state, WAITING_OPEN, 0, 0,
+                                   state.total_confirmed_count, None, None, None)
 
         # Detection always runs — it needs no calibrated thresholds, and the mandatory
         # visualization tool needs raw keypoints to be usable even before calibration.
@@ -91,7 +98,8 @@ class GestureHandKeypointPipeline:
         missing = self.config.missing_keys()
         if missing:
             waving_state = state.waving_tracker.update(False, timestamp, self.config)
-            return PipelineResult(track_id, False, waving_state, WAITING_OPEN, None, None, hands if hands else None)
+            return PipelineResult(track_id, False, waving_state, WAITING_OPEN, 0, 0,
+                                   state.total_confirmed_count, None, None, hands if hands else None)
 
         confirmed_this_frame = False
         best_confidence: Optional[float] = None
@@ -126,6 +134,7 @@ class GestureHandKeypointPipeline:
 
             if stage == CONFIRMED:
                 confirmed_this_frame = True
+                state.total_confirmed_count += 1
                 state.sequence_machine.reset()  # CONFIRMED is momentary — ready for the next gesture
                 # `stage` (local var) still reports "CONFIRMED" for THIS frame's result below,
                 # even though the machine object itself already reset for the next frame — the
@@ -147,12 +156,16 @@ class GestureHandKeypointPipeline:
         raw_condition_pass = state.confirmed_hold_until is not None and timestamp <= state.confirmed_hold_until
 
         waving_state = state.waving_tracker.update(raw_condition_pass, timestamp, self.config)
+        open_count, close_count = STAGE_COUNTS[best_stage]
 
         return PipelineResult(
             track_id=track_id,
             is_waving=(waving_state == GREEN),
             waving_state=waving_state,
             sequence_stage=best_stage,
+            open_count=open_count,
+            close_count=close_count,
+            total_confirmed_count=state.total_confirmed_count,
             confidence_debug=best_confidence,
             palm_facing_camera_debug=best_palm_facing,
             hands_raw=hands if hands else None,

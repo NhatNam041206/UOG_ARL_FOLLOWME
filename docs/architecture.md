@@ -52,11 +52,9 @@ modules/
   gesture_hand_keypoint/          The TRIGGER gesture method: MediaPipe hand-shape sequence
                                    classifier (two alternatives, wave_facing_gate and
                                    gesture_trajectory_verifier, were removed)
-  appearance_verifier/            OSNet Re-ID (shared dependency of target_tracking + target_recovery,
-                                   both superseded — see Post-trigger flow below)
-  target_tracking/                SUPERSEDED by autocar_adapter (below) — kept until the
-                                   replacement is confirmed working, then deleted (docs not updated further)
-  target_recovery/                SUPERSEDED by autocar_adapter (below) — same status
+  appearance_verifier/            OSNet Re-ID — no live caller currently (was a shared dependency
+                                   of target_tracking + target_recovery, both removed — see
+                                   Post-trigger flow below); kept as a runnable standalone tool
   autocar/                        Vendored tracking+recovery backbone (vinhh9608-byte/Autocar,
                                    commit 27ee33a) — YOLOv8-pose + ByteTrack + OSNet TargetLock,
                                    pulled in via `git clone` and kept COMPLETELY UNMODIFIED, not
@@ -368,8 +366,6 @@ debugging without the rest of the pipeline:
 | `human_detection_roi` | `modules/human_detection_roi/{test_human_detection_roi,visualize_human_detection_roi}.py` |
 | `gesture_hand_keypoint` (the TRIGGER gesture method) | `modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,visualize_gesture_hand_keypoint}.py` |
 | `appearance_verifier` | `modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
-| `target_tracking` | `modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py` — SUPERSEDED, same status |
-| `target_recovery` | `modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py` — SUPERSEDED, same status |
 | `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo, exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
 | `followme_orchestrator` | `modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py` — the only tool that exercises the ENTIRE pipeline end-to-end |
 

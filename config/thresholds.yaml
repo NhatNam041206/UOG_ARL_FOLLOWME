@@ -1,270 +1,114 @@
-# All values under `emergency_stop:` are PLACEHOLDERS — see modules/emergency_stop's spec
-# (Emergency Stop Module — Demo Implementation Spec). They have NOT been calibrated against real
-# hardware/camera data and MUST NOT be treated as validated defaults. Until every key below is
-# filled in with a real, measured value, modules.emergency_stop.interface.EmergencyStopModule
-# refuses to ever output GO — it holds EStopDecision.UNCERTAIN (STOP-equivalent) on every frame
-# and names the missing keys in EStopOutput.reason. This is intentional: operating the sole
-# collision-avoidance layer on guessed numbers is unsafe, so "not yet calibrated" degrades to
-# "always stopped," never to a silent default.
+# Every value below: what it means, its calibration status, and how to tune it — see
+# docs/parameters.md. `null` = deliberately uncalibrated (module fails closed); see that doc's
+# status legend (🔴/🟡/🟢) before changing anything here.
+
+# Sole collision-avoidance layer (modules/emergency_stop) — all keys required; see
+# docs/parameters.md#emergency_stop.
 emergency_stop:
-  # Optional — model weights path for this module's own standalone YOLO instance. Not a
-  # threshold, has a working default (yolo11n.onnx at repo root); uncomment only to override.
   # yolo_model_path: "yolo11n.onnx"
 
-  # --- ROI crop (spec §3.1) ---
-  # Runway edges as two straight, frame-relative lines (NOT curved, no bird's-eye/IPM transform,
-  # no steering-angle skew — see known limitations in modules/emergency_stop/roi.py). Each line
-  # is [[x_top_frac, y_top_frac], [x_bottom_frac, y_bottom_frac]] — two endpoints, normalized
-  # 0.0-1.0 fractions of frame width/height (0,0 = top-left corner). Together the two lines form
-  # a trapezoid/triangle ahead of the robot, narrow end toward the far/top of frame.
-  runway_left_line: null   # PLACEHOLDER — requires empirical calibration, e.g. [[0.40, 0.35], [0.10, 1.0]]
-  runway_right_line: null  # PLACEHOLDER — requires empirical calibration, e.g. [[0.60, 0.35], [0.90, 1.0]]
-  # Pixels added on the left/right of the runway trapezoid's bounding rectangle when cropping the
-  # ROI fed to detection. Exists only so the detector isn't starved by a razor-tight crop
-  # clipping bboxes at the edge — it does NOT loosen the runway-membership test itself (that
-  # always uses the exact, unbuffered trapezoid edges — see roi.py's docstring on this).
-  roi_buffer_px: null       # PLACEHOLDER — requires empirical calibration
+  runway_left_line: null
+  runway_right_line: null
+  roi_buffer_px: null
 
-  # --- Size pre-filter (spec §3.3) ---
-  size_prefilter_width_px: null   # PLACEHOLDER — requires empirical calibration
-  size_prefilter_height_px: null  # PLACEHOLDER — requires empirical calibration
+  size_prefilter_width_px: null
+  size_prefilter_height_px: null
 
-  # --- Three-zone runway logic (spec §3.4) ---
-  # The runway is sliced along its length by two y-fraction dividers, in the SAME full-frame
-  # normalized 0.0-1.0 coordinate space as the runway lines above (0 = top/far, 1 = bottom/near).
-  # far zone:  [runway top, zone_far_boundary)
-  # mid zone:  [zone_far_boundary, zone_mid_boundary)
-  # near zone: [zone_mid_boundary, runway bottom]
-  # (Confirmed with the user: no separate "near edge cutoff" needed — near zone runs to the
-  # runway's own bottom edge as defined by runway_left_line/runway_right_line, not a 3rd divider.)
-  zone_far_boundary: null  # PLACEHOLDER — requires empirical calibration
-  zone_mid_boundary: null  # PLACEHOLDER — requires empirical calibration
-  t_mid_seconds: null      # PLACEHOLDER — requires empirical calibration
+  zone_far_boundary: null
+  zone_mid_boundary: null
+  t_mid_seconds: null
 
-  # --- Low-confidence / untrusted frame handling (spec §3.5) ---
-  min_detection_confidence: null  # PLACEHOLDER — requires empirical calibration
-  # Frame processing latency budget is intentionally NOT a key here yet — spec §3.5/§6 says this
-  # cannot be set responsibly until frame-time (capture + inference + decision) is benchmarked on
-  # target hardware, since stopping distance depends on reaction time. Add it once that
-  # measurement exists; until then there is no latency-based UNCERTAIN check at all (not even a
-  # null one), only the always-measured-and-logged latency figure exposed for that benchmarking.
+  min_detection_confidence: null
 
-  # --- Resume logic (spec §3.6) ---
-  resume_buffer_seconds: null  # PLACEHOLDER — requires empirical calibration (~2-3s starting point per spec)
+  resume_buffer_seconds: null
 
-# Camera configuration — used by main.py when --mode camera is selected, and by
-# modules.followme_orchestrator's SteeringController (plans/08 §2/§3). Command-line
-# --camera-index takes precedence over camera_index below.
+# Used by main.py (--mode camera) and followme_orchestrator.SteeringController — see
+# docs/parameters.md#camera.
 camera:
-  camera_index: 2      # OS camera device index (0 = first/default camera, usually built-in webcam)
-  # fov_degrees is a fixed PHYSICAL property of the lens (not empirically tuned like other
-  # thresholds in this file), but must still be set correctly from the actual hardware's spec,
-  # not guessed — marked 🟢 (working-default-once-filled) rather than 🔴/🟡 for that reason. Gates
-  # modules.followme_orchestrator.SteeringController: without it, horizontal_offset can never be
-  # converted to a real steering angle (fail-closed, should_move forced False while tracking).
-  fov_degrees: 85.0    # this project's camera hardware datasheet value
-  lens_type: "hybrid"  # informational only — never consumed by any calculation
-  focus_type: "fixed"  # informational only — same rationale as lens_type. Because this camera's
-                        # focus is FIXED (not variable-zoom), fov_degrees is safe to treat as one
-                        # constant; a variable-focus/zoom lens would need fov_degrees to become a
-                        # function of zoom level instead — not this project's situation.
+  camera_index: 2
+  fov_degrees: 85.0
+  lens_type: "hybrid"
+  focus_type: "fixed"
 
-# PID steering gains (plans/08 §3/§4) — modules.followme_orchestrator.SteeringController converts
-# target_tracking's normalized horizontal_offset into a real angle (via camera.fov_degrees above)
-# then runs PID on it. All 4 keys are REQUIRED empirical/hardware values that cannot be guessed —
-# while any is null, SteeringController.is_calibrated() is False and the orchestrator forces
-# should_move=False even while a target is genuinely still being tracked (same fail-closed
-# convention as every other module in this project).
+# PID steering (followme_orchestrator.SteeringController) — see docs/parameters.md#steering-plans08--followme_orchestratorsteeringcontroller.
 steering:
-  kp: null                          # TODO: calibrate empirically against real Ackermann hardware
-  ki: null                          # TODO: calibrate empirically
-  kd: null                          # TODO: calibrate empirically
-  max_steering_angle_degrees: null  # TODO: set from the servo/Ackermann hardware's own datasheet limit — not a tuning target
+  kp: 1.0
+  ki: 0.5
+  kd: 0.5
+  max_steering_angle_degrees: 45.0
+  servo_center_degrees: 90.0
 
-# Human detection (optional, standalone instance) — own detector used internally by
-# modules.target_tracking / modules.target_recovery. Not calibration-gated (no spec requires it
-# here) — these have working defaults.
+# Standalone detector used internally by target_tracking/target_recovery — see
+# docs/parameters.md#human_detection.
 human_detection:
-  # yolo_model_path: "yolo11n.onnx"  # optional override, defaults to the nano model at repo root
-  confidence_threshold: 0.5  # YOLO detection confidence floor for the person class
+  # yolo_model_path: "yolo11n.onnx"
+  confidence_threshold: 0.5
 
-# Face Detection + Face Matching (plans/01_face_detection_matching.md). Values below are
-# STARTING GUESSES, NOT calibrated — same convention as wave_facing above: if either is later
-# set back to null, modules.face_identity.interface.evaluate() returns an empty list on every
-# frame (fail-closed).
+# Face detect + match, plans/01 — see docs/parameters.md#face_identity-plans01--first-stage-of-the-face-first-pipeline.
 face_identity:
-  # yunet_model_path: "modules/face_identity/models/face_detection_yunet_2023mar.onnx"  # optional override
-  # edgeface_model_path: "modules/face_identity/models/edgeface_xs_gamma_06.onnx"        # optional override
-  # registry_dir: "modules/face_identity/registry_data"                                  # optional override
-  similarity_threshold_face_match: 0.4        # STARTING GUESS — EdgeFace's own reference demo's default threshold
-  face_detection_confidence_threshold: 0.6    # STARTING GUESS — standard YuNet starting point
+  # yunet_model_path: "modules/face_identity/models/face_detection_yunet_2023mar.onnx"
+  # edgeface_model_path: "modules/face_identity/models/edgeface_xs_gamma_06.onnx"
+  # registry_dir: "modules/face_identity/registry_data"
+  similarity_threshold_face_match: 0.4
+  face_detection_confidence_threshold: 0.6
 
-# Human Detection, ROI-scoped (plans/02_human_detection_roi.md). Flow: Face -> ROI (derived from
-# face bbox size * roi_expansion_factor) -> Human detection inside that ROI, to tighten the crop
-# fed to the detector. Human detection is only ever triggered once a face has already been
-# matched — it never runs independently of a face match. No persistent track_id: the ROI crop
-# shifts every frame (it follows wherever the face currently is), which isn't a stable enough
-# coordinate frame for tracker-style persistence (confirmed with the user). Values below are
-# STARTING GUESSES, NOT calibrated — if either key is later set back to null,
-# modules.human_detection_roi.interface.evaluate() reports person_found=False on every call
-# (fail-closed), same convention as face_identity above.
+# ROI-scoped human detection, plans/02 — see docs/parameters.md#human_detection_roi-plans02--second-stage.
 human_detection_roi:
-  # yolo_model_path: "yolo11n.onnx"  # optional override, defaults to the nano model at repo root
-  # ROI expansion strategy (spec §2): downward/lateral-biased — most of the expansion goes below
-  # the face (body extends down, not up).
-  roi_expansion_factor: 10.0            # STARTING GUESS (spec suggests starting ~4-6x face bbox height) — not calibrated
-  # Tunable up/down/width split of roi_expansion_factor's budget (see roi.py) — working defaults
-  # below, uncomment to override. roi_upward_fraction: share of the height budget above the face
-  # (rest goes below); roi_width_fraction: ROI width as a fraction of face_w * roi_expansion_factor.
-  roi_upward_fraction: 0.04   # default — ~5% of the height budget goes up, ~95% down
-  roi_width_fraction: 0.8     # default — width = face_w * roi_expansion_factor * 0.6
-  detection_confidence_threshold: 0.5  # STARTING GUESS — standard YOLO starting point
+  # yolo_model_path: "yolo11n.onnx"
+  roi_expansion_factor: 10.0
+  roi_upward_fraction: 0.04
+  roi_width_fraction: 0.8
+  detection_confidence_threshold: 0.5
 
-# Gesture Detection — Hand Keypoint, the sole TRIGGER gesture method (plans/03_gesture_hand_keypoint.md
-# — was "Method 2" back when modules.wave_facing_gate and modules.gesture_trajectory_verifier
-# also existed as alternatives; both were removed, this is the only one left). Pure hand-shape
-# sequence classification, MediaPipe landmark geometry only (no wrist motion, no trajectory, no
-# arm geometry). Valid gesture = OPEN -> CLOSED -> OPEN -> CLOSED, each transition within
-# max_transition_gap_seconds of the last, starting from OPEN. Every OPEN/CLOSED read must also
-# independently clear the palm_height_fraction gate (palm/wrist in the upper fraction of the
-# person's FULL-FRAME bbox from modules.human_detection_roi) — failing that gate is an immediate
-# reset to WAITING_OPEN, confirmed with the user. Only ONE hand drives the sequence per frame —
-# whichever confident hand clears the height gate (highest confidence if more than one), Left/
-# Right side ignored entirely. CONFIRMED (sequence complete) feeds the shared RED/YELLOW/GREEN
-# confirmation tracker exactly as before. Values below are STARTING GUESSES, NOT calibrated — if
-# any key is later set back to null, is_waving stays False on every call (fail-closed); hand
-# detection/keypoints still run and are visualizable regardless of calibration state.
+# Gesture Detection — Hand Keypoint, the sole TRIGGER gesture method, plans/03 — see
+# docs/parameters.md#gesture_hand_keypoint-plans03--the-sole-trigger-gesture-method.
 gesture_hand_keypoint:
-  # model_path: "modules/gesture_hand_keypoint/models/hand_landmarker.task"  # optional override
-  confidence_threshold: 0.5                 # STARTING GUESS — MediaPipe handedness/detection confidence floor
-  # min_fingers_extended_open / min_fingers_curled_closed are both scored out of the 4 NON-THUMB
-  # fingers only. OPEN additionally requires the thumb to independently pass
-  # thumb_extension_ratio_threshold. CLOSED does NOT check the thumb at all — a natural fist
-  # rests the thumb over the curled fingers (not tucked into the palm), so the thumb's
-  # distance-based extension test does not reliably read "curled" for a real fist; requiring it
-  # would false-negative on a completely normal fist pose.
-  min_fingers_extended_open: 4              # STARTING GUESS — of 4 non-thumb fingers, how many extended (+ thumb extended) = OPEN
-  min_fingers_curled_closed: 4              # STARTING GUESS — of 4 non-thumb fingers, how many curled = CLOSED (fist); thumb ignored
-  # Thumb extension test (confirmed with the user): distance(thumb_tip, pinky_MCP), normalized
-  # by hand scale (distance(wrist, middle_MCP)), must exceed this ratio to count as extended.
-  # Large when the thumb sticks out away from the hand (open); small when tucked toward the palm.
-  # Only gates OPEN — see above.
-  thumb_extension_ratio_threshold: 0.6      # STARTING GUESS — unverified, calibrate against real open/fist footage
-  # Palm-height gate (confirmed with the user: landmark 0 / wrist, measured against the FULL-FRAME
-  # person bbox from modules.human_detection_roi, not just the hand-crop). Every OPEN/CLOSED read
-  # counted toward the sequence must independently clear this — failing it resets the sequence
-  # immediately (confirmed with the user), stricter than a merely non-advancing frame. Also acts
-  # as the selector for which hand drives the sequence when more than one hand is visible.
-  palm_height_fraction: 0.5                 # STARTING GUESS — upper 50% of the person's bbox
-  # Timeout between consecutive sequence transitions (spec: no partial credit past this gap).
-  max_transition_gap_seconds: 1.5           # STARTING GUESS (spec suggests starting ~1-2s)
-  confirmation_duration_seconds: 1.0        # STARTING GUESS
+  # model_path: "modules/gesture_hand_keypoint/models/hand_landmarker.task"
+  confidence_threshold: 0.5
+  min_fingers_extended_open: 4
+  min_fingers_curled_closed: 4
+  thumb_extension_ratio_threshold: 0.6
+  palm_height_fraction: 0.5
+  max_transition_gap_seconds: 1.5
+  confirmation_duration_seconds: 1.0
 
-# Appearance Verifier — OSNet Re-ID (plans/05_appearance_verifier.md). Answers "does this crop
-# look like the same person as this reference set" — consumed by modules.target_tracking
-# (periodic re-verify sanity check) and modules.target_recovery (fallback re-acquisition), each
-# with their OWN separate threshold key, not this one (see those modules' sections below).
-# similarity_threshold is ESPECIALLY uncalibrated — two documented accuracy risks (similar-
-# clothing confusion, cross-domain generalization drop from OSNet's Market1501 training data to
-# this project's own campus footage) make a "starting guess" here less trustworthy than usual —
-# see docs/parameters.md and docs/modules.md for both risks in full. Fail-closed as usual: while
-# null, verify() reports match_found=False on every call.
+# OSNet Re-ID, plans/05 — shared dependency of target_tracking/target_recovery below (each has its
+# OWN separate threshold key, not this one) — see docs/parameters.md#appearance_verifier-plans05.
 appearance_verifier:
-  similarity_threshold: null   # TODO: calibrate — especially uncalibrated, see note above
-  # osnet_model_name: "osnet_x1_0"  # optional override — not calibration-gated, working default
+  similarity_threshold: null
+  # osnet_model_name: "osnet_x1_0"
 
-# Target Recording + Tracking (plans/06_target_tracking.md). Locks onto the person the gesture
-# trigger identified, records a short appearance reference set, then tracks them frame-to-frame
-# via this module's own isolated YOLO+ByteTrack instance, reporting horizontal deviation from
-# frame-center for downstream steering. Hands off to target_recovery on LOST. All keys below
-# require empirical calibration (STARTING GUESSES / uncalibrated, per this module's spec §6).
-target_tracking:
-  record_duration_seconds: null                    # TODO: calibrate — spec suggests ~1-2s to start
-  min_recording_crops: 3                            # STARTING GUESS — below this, RECORDING extends rather than transitioning with a fragile reference set (confirmed with the user)
-  appearance_reverify_interval_seconds: null        # TODO: calibrate — how often the periodic ID-switch sanity check runs
-  appearance_reverify_similarity_threshold: null    # TODO: calibrate — deliberately its OWN key, independent from appearance_verifier.similarity_threshold (see that module's §4)
-  appearance_reverify_consecutive_failures: 2       # STARTING GUESS — confirmed with the user: 2 consecutive failed re-verifies before declaring LOST, not 1 (avoids a single bad-lighting frame triggering a full recovery cycle)
-  track_loss_grace_period_seconds: null             # TODO: calibrate — how long the locked track_id may be missing from ByteTrack's output before declaring LOST
-  # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance per isolation rule
+# modules.target_tracking/modules.target_recovery (plans/06, plans/07) — REMOVED 2026-08-26,
+# fully superseded by autocar below (see docs/parameters.md's autocar section for the one
+# capability with no replacement: no periodic re-verify while a track_id stays locked).
 
-# Target Recovery / Search (plans/07_target_recovery.md). Takes over when target_tracking reports
-# LOST — searches the full frame via face-based re-acquisition first (Path A, primary), falling
-# back to appearance-based matching (Path B) only after face_search_grace_attempts consecutive
-# Path-A failures. All keys require empirical calibration.
-target_recovery:
-  face_search_grace_attempts: null       # TODO: calibrate — a COUNT of consecutive Path-A-failure frames, NOT a time duration (see this module's spec §4.2 for why)
-  appearance_fallback_threshold: null    # TODO: calibrate — deliberately its OWN key, independent from appearance_verifier.similarity_threshold and target_tracking.appearance_reverify_similarity_threshold
-  search_timeout_seconds: null           # TODO: calibrate — spec suggests ~1-2 minutes as a starting range
-  # yolo_model_path: "yolo11n.onnx"  # optional override, own independent instance for Path B's whole-frame detection
-
-# Vendored tracking+recovery backbone (modules/autocar — vinhh9608-byte/Autocar, commit 8037862,
-# re-vendored from 27ee33a — see this section's own comments below for what changed), slated to
-# replace target_tracking + target_recovery above once confirmed working (module stays named
-# "autocar" until then, renaming to target_tracking afterward). Their engine (detector/, tracker/,
-# identity/, config.py) is kept UNMODIFIED — modules/autocar/ has nothing added to it either;
-# every value below is only ever read by the adapter code in
-# modules/followme_orchestrator/autocar_adapter.py (+ autocar_bootstrap.py), which lives outside
-# modules/autocar/ specifically so that directory stays a pure, untouched mirror of the clone,
-# and passes these into their classes' own constructor overrides — their vendored config.py is
-# never edited.
-#
-# What changed in 8037862: FRONT-face matching no longer uses OSNet on a keypoint-guessed head
-# rectangle — it now runs a REAL face detector (YuNet) + face-recognition embedding (SFace) on
-# that same head-region crop (identity/face_recognizer.py), replacing reid_similarity_threshold
-# with face_similarity_threshold. OSNet is now used ONLY for the BACK-of-head case (no face
-# detected = facing away), under its own back_head_similarity_threshold. Their old
-# reid_face_min_keypoint_conf key is GONE — "is a face visible" is now answered by running the
-# real detector, not guessing from keypoint confidence.
-#
-# Detector/tracker/re-id values are carried over as-is from their own config.py — those are
-# their own considered starting points, not values we invented, so treated as STARTING GUESSES
-# (same status as this project's other uncalibrated defaults) rather than blind guesses.
-# recovery_timeout_seconds has no equivalent in their code (their ACQUIRING phase retries
-# forever, no timeout) — TODO per this project's fail-closed convention: while null, the adapter
-# must not let a lost target search indefinitely without ever reporting back to
-# modules.followme_orchestrator (mirrors target_recovery.search_timeout_seconds above).
+# Vendored tracking+recovery backbone (modules/autocar) — see
+# docs/parameters.md#autocar-vendored-tracking--recovery-backbone-replaces-target_trackingtarget_recovery-above
+# for what changed in their commit 8037862, and the reid_head_split_fallback_fraction override gap.
 autocar:
-  # --- Detector (their detector/yolov8_pose_torch.py) ---
-  detect_conf: 0.4              # STARTING GUESS, carried from their config.py DETECT_CONF
-  detect_imgsz: 300              # STARTING GUESS, carried from their config.py DETECT_IMGSZ
-  # pose_model_path: "yolov8n-pose.pt"  # optional override, auto-downloaded by ultralytics like our own weights
+  detect_conf: 0.4
+  detect_imgsz: 320
+  # pose_model_path: "yolov8n-pose.pt"
 
-  # --- Tracker (their tracker/byte_tracker.py) ---
-  track_high_thresh: 0.6         # STARTING GUESS, carried from their config.py TRACK_HIGH_THRESH
-  track_low_thresh: 0.1          # STARTING GUESS, carried from their config.py TRACK_LOW_THRESH
-  new_track_thresh: 0.7          # STARTING GUESS, carried from their config.py NEW_TRACK_THRESH
-  match_thresh: 0.8              # STARTING GUESS, carried from their config.py MATCH_THRESH
-  low_match_thresh: 0.5          # STARTING GUESS, carried from their config.py LOW_MATCH_THRESH
-  track_buffer: 30               # STARTING GUESS, carried from their config.py TRACK_BUFFER
+  track_high_thresh: 0.6
+  track_low_thresh: 0.1
+  new_track_thresh: 0.7
+  match_thresh: 0.8
+  low_match_thresh: 0.5
+  track_buffer: 30
 
-  # --- Re-ID / TargetLock (their identity/target_lock.py) ---
-  face_similarity_threshold: 0.363       # opencv_zoo's OWN documented "same person" cutoff for this exact SFace model, carried from their config.py FACE_SIMILARITY_THRESHOLD — a real published starting point, but still worth recalibrating against this project's own footage
-  back_head_similarity_threshold: 0.7    # STARTING GUESS, carried from their config.py REID_BACK_HEAD_SIMILARITY_THRESHOLD — ESPECIALLY uncalibrated, same OSNet accuracy caveats as appearance_verifier above (this is now the ONLY case OSNet is used for)
-  # reid_head_split_fallback_fraction (0.35) / reid_head_crop_width_fraction (0.7): informational
-  # only — carried from their config.py, but NOT overridable from here. Both are read by
-  # identity/face_region.py directly off the vendored config module's own globals, not passed
-  # through TargetLock's constructor, so there is no seam for our adapter to override them
-  # without either editing their file (not allowed) or monkey-patching their module's attributes
-  # at runtime (not done — treat as a known gap if these ever need calibrating).
-  reid_acquire_rounds: 3                 # STARTING GUESS, carried from their config.py REID_ACQUIRE_ROUNDS — only used on initial force-lock IoU fallback, not the normal trigger path
-  reid_acquire_cooldown_sec: 0.5         # STARTING GUESS, carried from their config.py REID_ACQUIRE_COOLDOWN_SEC
-  # reid_model_path: "modules/autocar/models/osnet_x1_0_msmt17.onnx"          # optional override — file must exist; see modules/autocar/models/README.md
-  # face_detector_model_path: "modules/autocar/models/face_detection_yunet_2023mar.onnx"      # optional override
-  # face_recognizer_model_path: "modules/autocar/models/face_recognition_sface_2021dec.onnx"  # optional override
+  face_similarity_threshold: 0.363
+  back_head_similarity_threshold: 0.7
+  reid_head_split_fallback_fraction: 0.35
+  reid_acquire_rounds: 3
+  reid_acquire_cooldown_sec: 0.5
+  # reid_model_path: "modules/autocar/models/osnet_x1_0_msmt17.onnx"
+  # face_detector_model_path: "modules/autocar/models/face_detection_yunet_2023mar.onnx"
+  # face_recognizer_model_path: "modules/autocar/models/face_recognition_sface_2021dec.onnx"
 
-  # --- Ours, not theirs (closes the "search forever" gap noted above) ---
-  recovery_timeout_seconds: null  # TODO: calibrate — spec-equivalent to target_recovery.search_timeout_seconds above
+  recovery_timeout_seconds: null  # ours, not theirs — see docs/parameters.md
 
-# register_person.py's capture ROI — a bounding box (fraction of frame width/height, same
-# [x1,y1,x2,y2] convention as emergency_stop's runway lines / autocar's own ENROLL_ROI_PERCENT)
-# that a detection must fall inside to be accepted as a capture sample. Exists so that if someone
-# else walks through the background (or stands next to the subject) during registration, their
-# face/body doesn't get captured into the subject's profile by mistake — the operator points the
-# camera so the intended subject stands inside this box, everyone else outside it is ignored.
-# Two separate keys because the FRONT and BACK phases use different detectors (face vs. person)
-# and the subject may naturally stand slightly differently in each. STARTING GUESS defaults
-# (centered, most of the frame height) — not hardware-calibrated, just a reasonable box to start
-# from; adjust to match your actual camera framing.
+# register_person.py's capture ROI — see docs/parameters.md#register_person-register_personpy--not-a-per-frame-pipeline-module.
 register_person:
-  front_roi_percent: [0.20, 0.05, 0.80, 0.95]  # STARTING GUESS — checked against the detected face bbox's center
-  back_roi_percent: [0.15, 0.0, 0.85, 1.0]     # STARTING GUESS — checked against the detected person bbox's center (wider: a turned-around body silhouette varies more than a face)
+  front_roi_percent: [0.20, 0.05, 0.80, 0.95]
+  back_roi_percent: [0.15, 0.0, 0.85, 1.0]

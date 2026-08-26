@@ -39,6 +39,12 @@ python main.py --mode camera --modules followme --show --debug
 
 # Against a recorded video instead of a live camera
 python main.py --mode video --video path/to/file.mp4 --modules followme --show --debug
+
+# Headless (no --show) over SSH, still fully reviewable afterward: every pretrigger/followme run
+# ALWAYS writes runs/<timestamp>_<mode>/{meta.json,decisions.jsonl}; add --save-video to also
+# save the annotated overlay as debug.avi, even with no window open. See "Reviewing a run" below.
+python main.py --mode camera --modules followme --save-video
+python main.py --mode camera --modules followme --save-video --log-dir /home/pi/followme_runs
 ```
 
 | Flag | Applies to | Meaning |
@@ -52,7 +58,9 @@ python main.py --mode video --video path/to/file.mp4 --modules followme --show -
 | `--front-samples` / `--back-samples` | `register` | Sample counts per capture phase (default 15 each) |
 | `--then-followme` | `register --person-name` | On success, fall through into the same `followme` camera loop |
 | `--show` | always | Opens a display window (registration's own capture window always shows regardless) |
-| `--debug` | `pretrigger \| followme` | Full per-phase debug overlay — only visible combined with `--show`. `pretrigger`: face bbox + ROI + gesture keypoints/skeleton/state. `followme`: all of that PLUS `autocar_adapter`'s tracked bbox/center-line/state readout, via `modules.followme_orchestrator.draw_debug()`. |
+| `--debug` | `pretrigger \| followme` | Full per-phase debug overlay — only visible combined with `--show` (or saved via `--save-video`, see below). `pretrigger`: face bbox + ROI + gesture keypoints/skeleton/state. `followme`: all of that PLUS `autocar_adapter`'s tracked bbox/center-line/state readout, via `modules.followme_orchestrator.draw_debug()`. |
+| `--save-video` | `pretrigger \| followme` | Saves the annotated debug overlay to `runs/<run_id>/debug.avi` (MJPG) — independent of `--show`, works headlessly over SSH. The overlay is drawn even without `--show` whenever this is set, so the saved video matches what `--debug`/`--show` would have displayed live. |
+| `--log-dir` | `pretrigger \| followme` | Where per-run structured logs are written (default `runs`). Always on — see "Reviewing a run" below. |
 
 `--modules followme` is a thin wrapper `main.py` puts around
 `modules.followme_orchestrator.interface` — the actual trigger → tracking → recovery → steering
@@ -69,6 +77,30 @@ python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode v
 `followme_orchestrator.configure()` (called once, before the frame loop, by any of the paths
 above) eagerly loads every model the pipeline will use — takes a few seconds up front so nothing
 cold-starts later, mid-session, at the exact moment a gesture trigger fires.
+
+### Reviewing a run (`runs/<timestamp>_<mode>/` — plans/10_debug_logging_observability.md)
+
+Every `--modules pretrigger` or `--modules followme` run (`register` doesn't apply) writes a
+timestamped, self-contained folder, printed at startup as `logging to runs/...`:
+
+```
+runs/20260826T210455Z_followme/
+    meta.json         # git commit, argv, full resolved thresholds.yaml snapshot at run start,
+                       # start/end time, frame count, how the run ended, video info if saved
+    decisions.jsonl     # one structured JSON record per frame — face match, gesture sequence
+                        # progress, tracking state, steering command
+    debug.avi           # only if --save-video was passed
+```
+
+This is what makes a headless SSH test run (no `--show`) fully reviewable afterward — pull the
+whole folder down and inspect it locally instead of needing a monitor on the Pi:
+
+```bash
+scp -r pi@<host>:~/UOG_AIS_FOLLOWME/runs/20260826T210455Z_followme .
+python -c "import json; print(json.load(open('20260826T210455Z_followme/meta.json'))['exit_reason'])"
+tail -f runs/<latest>/decisions.jsonl   # while a run is still in progress, on the Pi itself
+```
+`runs/` is gitignored — these are per-run artifacts, not project source.
 
 ### Registering people (`register_person.py` / `--modules register`)
 
@@ -195,34 +227,12 @@ python -m modules.appearance_verifier.visualize_appearance_verifier --reference-
 First run downloads the Market1501-pretrained OSNet checkpoint (~10MB, one-time, needs network
 access to Google Drive) — see [`technologies.md`](technologies.md).
 
-### `target_tracking` / `target_recovery` — SUPERSEDED, no longer in the live call path
-
-`followme_orchestrator` now drives `modules/autocar` (via `autocar_adapter.py`) for
-tracking+recovery instead — see [`architecture.md`](architecture.md)'s Post-trigger flow section
-and "Testing the vendored tracking+recovery backbone alone" above. These two modules and their
-tools below still exist and still run standalone; they're just not called by anything anymore.
-
-```bash
-# Test: exercises RECORDING -> TRACKING -> LOST using an auto-placed centered bbox (no interaction)
-python -m modules.target_tracking.test_target_tracking path/to/video.mp4
-
-# Visualization: click-and-drag a box around a person to start an episode; 'r' re-arms, 'q' quits
-python -m modules.target_tracking.visualize_target_tracking --mode camera [--camera-index 0]
-python -m modules.target_tracking.visualize_target_tracking --mode video --video path/to/video.mp4
-```
-
-### `target_recovery`
-
-```bash
-# Test: runs a search episode against a video until REACQUIRED or TIMEOUT
-python -m modules.target_recovery.test_target_recovery path/to/video.mp4 --target-person-name <name> --reference-dir path/to/reference_images/
-
-# Visualization: shows which path (A/B) is active, fail count, and the timeout countdown
-python -m modules.target_recovery.visualize_target_recovery --target-person-name <name> --reference-dir path/to/reference_images/ --mode camera [--camera-index 0]
-python -m modules.target_recovery.visualize_target_recovery --target-person-name <name> --reference-dir path/to/reference_images/ --mode video --video path/to/video.mp4
-```
-`<name>` must already exist in the face registry (see `face_identity`'s registration commands
-above) — `target_recovery`'s Path A filters specifically for this name.
+`modules/target_tracking` and `modules/target_recovery` — REMOVED (2026-08-26). `followme_orchestrator`
+drives `modules/autocar` (via `autocar_adapter.py`) for tracking+recovery instead — see
+[`architecture.md`](architecture.md)'s Post-trigger flow section and "Testing the vendored
+tracking+recovery backbone alone" above. See [`parameters.md`](parameters.md#target_tracking--target_recovery-plans06-plans07--removed-2026-08-26)
+for the one capability (periodic re-verify against silent ByteTrack ID reassignment) that has no
+replacement in `autocar`.
 
 ### `followme_orchestrator` (the FULL pipeline, all 8 plans composed together)
 

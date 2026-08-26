@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from .steering_controller import DEFAULT_SERVO_CENTER_DEGREES
+
 # fov_degrees gates SteeringController: without a real angle-conversion factor, horizontal_offset
 # can never become a real steering angle — fail-closed, same convention as every other module in
 # this project (should_move is forced False while actively tracking, until this is set).
@@ -24,6 +26,10 @@ class FollowMeOrchestratorConfig:
     ki: Optional[float] = None
     kd: Optional[float] = None
     max_steering_angle_degrees: Optional[float] = None
+
+    # Not calibration-gated — has a working default (this project's servo hardware convention),
+    # override only if your servo's center pulse position differs from 90.
+    servo_center_degrees: float = DEFAULT_SERVO_CENTER_DEGREES
 
     # Not calibration-gated — informational hardware documentation only (plans/08 §2).
     lens_type: Optional[str] = None
@@ -50,4 +56,5 @@ def load_config(thresholds_path: str = "config/thresholds.yaml") -> FollowMeOrch
         ki=steering_section.get("ki"),
         kd=steering_section.get("kd"),
         max_steering_angle_degrees=steering_section.get("max_steering_angle_degrees"),
+        servo_center_degrees=steering_section.get("servo_center_degrees", DEFAULT_SERVO_CENTER_DEGREES),
     )

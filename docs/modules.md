@@ -57,12 +57,10 @@ benchmarking the spec requires before a latency budget can be safely set.
 
 ## `human_detection`
 
-**Pipeline position:** none — a standalone detector, own instance, used internally by
-`modules.target_tracking`/`modules.target_recovery`. Used to also feed a first-stage gesture
-module (`wave_facing_gate`) in a legacy pipeline; that module was removed (confirmed with the
-user — `gesture_hand_keypoint` is the only TRIGGER gesture method left, fed by
-`human_detection_roi` instead — see below), so this module no longer feeds anything in either
-`pretrigger` or `followme`.
+**Pipeline position:** none — a standalone detector, own instance. Its historical consumers
+(`wave_facing_gate`, `target_tracking`, `target_recovery`) have all been removed — this module
+currently has no live caller at all in either `pretrigger` or `followme`; kept as a runnable
+standalone tool.
 
 **Purpose:** fast, whole-frame, person-only detection + tracking.
 
@@ -233,10 +231,10 @@ for the full tuning workflow.
 
 ## `appearance_verifier`
 
-**Pipeline position:** shared dependency, not part of either main pipeline's own data flow —
-consumed by `modules.target_tracking` (a periodic re-verification sanity check during active
-tracking) and `modules.target_recovery` (a fallback re-acquisition path). Holds no per-caller
-state; both callers may run their own independent usage of it simultaneously.
+**Pipeline position:** none currently — not part of either main pipeline's data flow. Was a shared
+dependency of the now-removed `target_tracking` (periodic re-verification during active tracking)
+and `target_recovery` (fallback re-acquisition path); `autocar` uses its own independent OSNet
+embedder instead of this module. Holds no per-caller state.
 
 **Purpose:** answers one question — "does this new person crop look like the same person as this
 earlier set of reference crops?" — an appearance-based identity check, distinct from and
@@ -283,157 +281,24 @@ calibration-gated. See [parameters.md](parameters.md#appearance_verifier).
    datasets). This project's own campus footage/lighting/camera are an untested domain relative
    to that training data — a distinct risk from clothing confusion, not the same one.
 
-Both `target_tracking`'s periodic re-verify and `target_recovery`'s Path B fallback inherit both
-risks whole; each caller uses its own independently-tunable threshold key rather than this
-module's `similarity_threshold`, precisely so each can be tuned to its own risk tolerance (a
-false LOST during active tracking is a different cost than a false re-acquisition during search).
+The now-removed `target_tracking`'s periodic re-verify and `target_recovery`'s Path B fallback
+each inherited both risks whole, using their own independently-tunable threshold key rather than
+this module's `similarity_threshold` — precisely so each could be tuned to its own risk tolerance
+(a false LOST during active tracking is a different cost than a false re-acquisition during
+search). No live caller uses this module currently.
 
 ---
 
-## `target_tracking` — SUPERSEDED, not in the live call path
+## `target_tracking` / `target_recovery` — REMOVED 2026-08-26
 
-> **`modules.followme_orchestrator` no longer calls this module.** It now drives
-> `modules/autocar` (vendored tracking+recovery backbone) via `autocar_adapter.py` instead — see
-> [`autocar` / `autocar_adapter`](#autocar--autocar_adapter-vendored-tracking--recovery-backbone)
-> below and [architecture.md](architecture.md#post-trigger-flow-tracking-recovery--steering-plans05-08-backbone-replaced-since).
-> This module and its own `test_*.py`/`visualize_*.py` still exist and still run standalone;
-> kept until the replacement is fully confirmed, then deleted. The description below documents
-> what it does/did, for reference.
-
-**Pipeline position (historical):** took over once a gesture trigger is confirmed (`is_waving`
-reaches `GREEN` in whichever gesture method is active) — driven by `modules.followme_orchestrator`
-(`main.py --modules followme`), which composed this module together with the rest of the
-pipeline. Also complete and independently testable on its own. Handed off to
-`modules.target_recovery` on `LOST`.
-
-**Purpose:** lock onto the triggering person as "the target," record a short appearance
-reference set, track them frame-to-frame, and report how far off-center they are for downstream
-steering — without doing any steering computation itself.
-
-**Working principle:**
-1. `start(initial_person_bbox, frame, timestamp)` records the desired target bbox and enters
-   `RECORDING`. The actual `track_id` **lock** happens on the next `update()` call: this module's
-   own standalone YOLO+ByteTrack instance (`tracker.py`, `persist=True` — unlike
-   `human_detection_roi`'s deliberately stateless single-frame `.predict()`, this tracker follows
-   the locked target continuously) reports every visible person; whichever detection best matches
-   the desired bbox (center-containment first, closest-center fallback — the same disambiguation
-   *style* `human_detection_roi._select_best_detection` uses, independently reimplemented) has
-   its `track_id` adopted as the lock. Every later frame, only that `track_id` is followed.
-2. **RECORDING**: every frame the locked target is seen, its crop is appended to a buffer.
-   Elapsed time is measured via the `timestamp` argument, never an assumed frame rate. Once
-   `record_duration_seconds` elapses: if fewer than `min_recording_crops` usable crops were
-   collected (confirmed with the user), RECORDING **extends** — keeps what it has, gives itself
-   more time — rather than building a fragile reference set; otherwise
-   `appearance_verifier.build_reference_set()` is called once and the module transitions to
-   `TRACKING`.
-3. **TRACKING**: every frame, `compute_horizontal_offset()` derives a normalized `-1.0` (frame-left)
-   to `+1.0` (frame-right) deviation from the bbox center vs. frame center — deliberately **not**
-   a true angle; FOV-based angle conversion is the downstream steering layer's job, never this
-   module's (`camera.fov_degrees` never appears in its config).
-4. **Periodic appearance re-verification**, every `appearance_reverify_interval_seconds` (not
-   every frame, for cost reasons): calls `appearance_verifier.verify()` on the current crop
-   against the reference set, using this module's **own**
-   `appearance_reverify_similarity_threshold` (never `appearance_verifier`'s own
-   `similarity_threshold` — kept independently tunable by design). **Two consecutive failures**
-   (confirmed with the user, over declaring `LOST` on the first) are required before transitioning
-   to `LOST` — a single bad-lighting/occlusion frame doesn't end tracking.
-5. **Track loss**: if the locked `track_id` is missing from the tracker's output for
-   `track_loss_grace_period_seconds` of continuous wall-clock time, transition to `LOST`. This
-   check applies uniformly during RECORDING too (an extension beyond the spec's literal wording,
-   which addresses it only under TRACKING) — RECORDING needs the same tracker running
-   continuously to keep capturing the *moving* target, so "is the locked ID still being seen" is
-   the same question in both states.
-6. **`LOST`**: `target_locked` becomes `False`; `reference_set` stays populated with the
-   last-built set so the caller (or `target_recovery` directly) has what it needs to attempt
-   re-acquisition. Nothing further happens until `reset(fresh_person_bbox, frame, timestamp)` is
-   called (re-enters `RECORDING`, identical to a fresh `start()`).
-
-**Public contract** (`TrackingResult`): `target_locked`, `horizontal_offset`, `person_bbox`
-(x,y,w,h, full-frame), `state` (`RECORDING`/`TRACKING`/`LOST`), `reference_set`.
-
-**Key parameters:** `record_duration_seconds`, `appearance_reverify_interval_seconds`,
-`appearance_reverify_similarity_threshold`, `track_loss_grace_period_seconds` — all required,
-fail-closed. `min_recording_crops` (3) and `appearance_reverify_consecutive_failures` (2) are
-working defaults confirmed with the user. See [parameters.md](parameters.md#target_tracking).
-
-**Known limitations:**
-- ByteTrack's `track_id` continuity is motion-based, not identity-verified (same caveat
-  documented for `human_detection`). In a crowd, ByteTrack can silently reassign the locked
-  `track_id` to a different nearby person after an occlusion without ever reporting a track loss
-  — the periodic appearance re-verification exists specifically to catch this failure mode, not
-  as a general accuracy improvement.
-- No true-angle/FOV-based steering computation, and no PID or control-loop logic of any kind —
-  both are the downstream steering layer's job (`plans/08`, not yet built).
-- `reset()`'s implemented signature (`fresh_person_bbox, frame, timestamp`) intentionally differs
-  from `plans/06_target_tracking.md §0.3`'s literal draft, which omitted those parameters despite
-  `reset()`'s own docstring describing a fresh bbox being handed back — an internal spec
-  inconsistency, resolved to match the described behavior.
-
----
-
-## `target_recovery` — SUPERSEDED, not in the live call path
-
-> Same status as `target_tracking` above — `autocar_adapter`'s `TargetLock` folds recovery
-> directly into its own tracking state machine, so there is no separate recovery module/call site
-> anymore. Kept until the replacement is fully confirmed, then deleted.
-
-**Pipeline position (historical):** took over once `modules.target_tracking` reported
-`state == LOST`. Driven by `modules.followme_orchestrator` (`main.py --modules followme`) — see
-the note on `target_tracking` above.
-
-**Purpose:** re-acquire the same registered target by searching the *whole* frame (not the
-narrow region tracking was using), via two paths of different strength and cost.
-
-**Working principle:**
-1. `start(reference_set, target_person_name, timestamp)` begins a search episode.
-   `target_person_name` identifies *which* registered person this episode is for — added beyond
-   `plans/07_target_recovery.md §0.3`'s literally drafted signature (confirmed with the user,
-   flagged by the spec itself as a likely real gap): `face_identity.evaluate()` can return
-   multiple registered people's matches in a crowd, and Path A needs to know which one is
-   actually the target rather than accepting any registered match.
-2. **Path A (primary, tried every frame):** `face_identity.evaluate(frame, registry)`, filtered
-   to a result where `is_registered_match` and `matched_person_name == target_person_name`. A
-   match resets the consecutive-failure counter (`face_search_fail_count`) unconditionally — the
-   thing that counter tracks is "is the target's face even detectable/matchable," which this
-   already answers "yes" to — then `human_detection_roi.evaluate()` (identical to the main
-   pipeline's own Stage 1→2 handoff) gets a fresh body bbox. `person_found` → `REACQUIRED` via
-   `"face_match"`. If the face matched but the body wasn't found this exact frame (rare: face
-   visible, body occluded), the episode keeps searching without incrementing the failure count.
-   No match → `face_search_fail_count += 1`.
-3. **Path B (fallback, only once `face_search_fail_count >= face_search_grace_attempts`):** a
-   **standalone** whole-frame person detector (own independent YOLO instance, per the spec's own
-   default — never `human_detection`'s existing detection call) finds every visible person;
-   `appearance_verifier.verify()` runs against each candidate using this module's **own**
-   `appearance_fallback_threshold`. The best candidate clearing it → `REACQUIRED` via
-   `"appearance_fallback"`, using that candidate's bbox **directly** — `human_detection_roi` is
-   deliberately **not** re-run, since Path B already found a body bbox by a different mechanism;
-   re-scoping a region already known to contain the target would be pure waste.
-4. `face_search_grace_attempts` is a **COUNT** of consecutive Path-A-failure frames, not a time
-   duration (deliberate, per the spec — see Known Limitations). `search_timeout_seconds` (a real
-   time duration) is checked every frame regardless of which path is being tried; once elapsed
-   with no `REACQUIRED`, the episode resolves to `TIMEOUT`.
-5. `REACQUIRED` and `TIMEOUT` are terminal for a given episode — the caller (orchestration layer)
-   is responsible for calling `target_tracking.reset()` on `REACQUIRED`, or propagating a stop
-   signal on `TIMEOUT`. This module produces no robot commands of its own.
-
-**Public contract** (`RecoveryResult`): `status` (`SEARCHING`/`REACQUIRED`/`TIMEOUT`),
-`reacquired_person_bbox` (populated only on `REACQUIRED`), `reacquired_via`
-(`"face_match"`/`"appearance_fallback"`), `face_search_fail_count`, `elapsed_search_seconds`.
-
-**Key parameters:** `face_search_grace_attempts`, `appearance_fallback_threshold`,
-`search_timeout_seconds` — all required, fail-closed. See
-[parameters.md](parameters.md#target_recovery).
-
-**Known limitations:**
-- `face_search_grace_attempts` is a count, not a duration — deliberate: face detection (YuNet,
-  full-frame) is variable-cost inference, so a time-based gate would give Path A an inconsistent
-  number of real attempts depending on system load that cycle (unfair to Path A on a slow cycle,
-  unnecessarily cautious on a fast one). A count ties the threshold to actual attempts made,
-  independent of frame rate. Do not conflate this with `search_timeout_seconds`, which correctly
-  remains time-based since it bounds total wall-clock search duration, not attempt count.
-- Path B inherits **both** of `appearance_verifier`'s named risks whole (see that module's
-  section above) — similar-clothing confusion and cross-domain generalization drop. Not
-  re-explained here; both apply exactly as documented there.
+Both modules (and their `test_*.py`/`visualize_*.py` tools) were deleted once `autocar` (below)
+was confirmed as their working replacement — see
+[architecture.md](architecture.md#post-trigger-flow-tracking-recovery--steering-plans05-08-backbone-replaced-since).
+Full working-principle/known-limitations writeups for both are in git history
+(`git log -- docs/modules.md`) if ever needed. One thing does NOT carry over cleanly — see
+[parameters.md](parameters.md#target_tracking--target_recovery-plans06-plans07--removed-2026-08-26)
+for the capability with no `autocar` equivalent (periodic re-verify against ByteTrack silently
+reassigning a locked `track_id` without ever reporting a loss).
 
 ---
 
@@ -592,10 +457,10 @@ actual robot command, not a per-module debug readout; no-ops while `should_move`
 
 ## `SteeringController` (part of `followme_orchestrator`)
 
-**Purpose:** converts `target_tracking`'s normalized `horizontal_offset` (-1.0..+1.0) into a real
+**Purpose:** converts `autocar_adapter`'s normalized `horizontal_offset` (-1.0..+1.0) into a real
 steering angle and runs PID on it — the one place in this whole project where a normalized
-deviation becomes an actual angle (`target_tracking` explicitly refuses to do this itself, see
-that module's known limitations).
+deviation becomes an actual angle (neither `autocar_adapter` nor the tracking engine it drives do
+this themselves — see this module's own docstring for that architecture boundary).
 
 **Working principle:** `error_degrees = horizontal_offset * (fov_degrees / 2.0)`, then standard
 PID (`kp * error + ki * integral + kd * derivative`), clamped to

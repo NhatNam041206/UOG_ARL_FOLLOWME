@@ -107,7 +107,7 @@ Drawn on top of everything above via `modules.followme_orchestrator.draw_debug()
 tracking episode is active (the pre-trigger overlays above stop being drawn at that point — only
 one "mode" of overlay is active per frame, matching `debug_state`).
 
-### `autocar_adapter` — `TrackingResult.draw_debug(frame)` (replaces `target_tracking`/`target_recovery` below)
+### `autocar_adapter` — `TrackingResult.draw_debug(frame)` (replaces the removed `target_tracking`/`target_recovery`)
 
 | Color | BGR | Meaning |
 |---|---|---|
@@ -199,10 +199,8 @@ meaningful.
 | 🔴 Red | `(0, 0, 255)` | `match_found = False` (compared, genuinely didn't match). |
 | ⚪ Gray | `(200, 200, 200)` | `reference_frame_count == 0` — "not ready," never attempted a real comparison. Distinguish this from red: gray means no comparison happened at all, red means one happened and failed. |
 
-### `target_tracking`'s click-and-drag selection box (`visualize_target_tracking.py`, SUPERSEDED module)
-
-A fixed orange-blue `(255, 200, 0)`, 1px — purely a UI affordance while dragging out the initial
-bbox before an episode starts; not a status indicator.
+`target_tracking`'s click-and-drag selection box (`visualize_target_tracking.py`) is gone along
+with the module — see [`parameters.md`](parameters.md#target_tracking--target_recovery-plans06-plans07--removed-2026-08-26).
 
 ---
 

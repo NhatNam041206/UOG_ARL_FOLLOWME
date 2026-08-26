@@ -41,3 +41,8 @@ modules/autocar/data/*.npz
 # adapter always runs with THIS repo's root as CWD (not modules/autocar/), so it lands here,
 # at the top level, not inside the vendored tree. Session-only, gitignored in their own repo too.
 /temp_dataset/
+
+# main.py run artifacts (plans/10_debug_logging_observability.md) — per-run decision logs, run
+# manifests, and optional debug video, written to runs/<timestamp>_<mode>/ every pretrigger/
+# followme run. Run artifacts, not project source; scp them off the Pi instead of committing them.
+/runs/

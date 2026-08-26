@@ -46,16 +46,18 @@ import numpy as np
 from .config import FollowMeOrchestratorConfig, load_config
 from .pipeline import FollowMeOrchestratorPipeline
 
-__all__ = ["FollowMeCommand", "configure", "step", "draw_debug", "draw_steering_arrow"]
+__all__ = ["FollowMeCommand", "configure", "step", "draw_debug", "draw_steering_arrow", "debug_snapshot"]
 
 
 @dataclass
 class FollowMeCommand:
     should_move: bool                       # True = move forward, False = stop. No speed
                                               # parameter — speed is a downstream, separate concern.
-    steering_angle_degrees: Optional[float]  # signed angle for the Ackermann servo; None when
-                                              # should_move is False (no meaningful steering
-                                              # target when stopped)
+    steering_angle_degrees: Optional[float]  # ABSOLUTE servo angle, ready to write directly to
+                                              # the servo (config: steering.servo_center_degrees,
+                                              # default 90 = straight ahead; no further conversion
+                                              # needed downstream). None when should_move is False
+                                              # (no meaningful steering target when stopped)
     debug_state: str                         # current high-level pipeline state, for logging/
                                               # visualization (e.g. "WAITING_FOR_TRIGGER",
                                               # "TRACKING_STARTED", "TRACKING",
@@ -100,6 +102,18 @@ def step(frame: np.ndarray, timestamp: float) -> FollowMeCommand:
     )
 
 
+def debug_snapshot() -> dict:
+    """
+    Plain-dict snapshot of the CURRENT frame's decision-relevant fields (face match, gesture
+    sequence progress, tracking state), for structured logging — see
+    plans/10_debug_logging_observability.md. NOT part of the FollowMeCommand contract: keys may be
+    added or removed without notice, unlike step()'s own typed return value. Call this AFTER
+    step(), same convention as draw_debug()/draw_steering_arrow() — it reads from whichever
+    phase(s) that step() call actually ran, it does not re-run any inference itself.
+    """
+    return _get_pipeline().debug_snapshot()
+
+
 def draw_debug(frame: np.ndarray) -> None:
     """
     Draws EVERY phase's own debug overlay onto `frame` — face_identity's bbox+match,
@@ -123,12 +137,11 @@ _ARROW_ORIGIN_MARGIN_PX = 30
 def draw_steering_arrow(frame: np.ndarray, command: FollowMeCommand) -> None:
     """
     Draws an arrow from bottom-center of `frame` showing the CALCULATED steering direction —
-    the same `steering_angle_degrees` the robot is actually being commanded with this frame, not
-    a re-derivation of it. 0 degrees points straight up (ahead); positive angles tilt right,
-    negative left — the exact sign convention SteeringController.update() already uses
-    (`error_degrees = horizontal_offset * (fov_degrees / 2)`, positive when the tracked person's
-    center is to the right of frame-center — see autocar_adapter.py's horizontal_offset and
-    steering_controller.py's docstring).
+    derived from the same `steering_angle_degrees` the robot is actually being commanded with
+    this frame (an ABSOLUTE servo angle, config: steering.servo_center_degrees=90=straight by
+    default — see steering_controller.py's docstring), not a re-derivation of it. The arrow itself is drawn
+    relative to straight-ahead: 0 degrees of visual tilt (servo angle 90) points straight up;
+    positive servo angles (>90) tilt the arrow right, negative (<90) tilt it left.
 
     No-ops (draws nothing) when should_move is False or steering_angle_degrees is None — i.e.
     whenever the robot isn't actually being told to move, there is no "calculated direction" to
@@ -138,11 +151,12 @@ def draw_steering_arrow(frame: np.ndarray, command: FollowMeCommand) -> None:
         return
     frame_h, frame_w = frame.shape[:2]
     origin = (frame_w // 2, frame_h - _ARROW_ORIGIN_MARGIN_PX)
-    angle_rad = math.radians(command.steering_angle_degrees)
+    tilt_degrees = command.steering_angle_degrees - _get_pipeline().steering.servo_center_degrees
+    angle_rad = math.radians(tilt_degrees)
     tip = (
         int(origin[0] + _ARROW_LENGTH_PX * math.sin(angle_rad)),
         int(origin[1] - _ARROW_LENGTH_PX * math.cos(angle_rad)),
     )
     cv2.arrowedLine(frame, origin, tip, _ARROW_COLOR, 3, tipLength=0.3)
-    cv2.putText(frame, f"{command.steering_angle_degrees:+.1f} deg", (origin[0] + 12, origin[1] - 10),
+    cv2.putText(frame, f"servo={command.steering_angle_degrees:.1f} deg", (origin[0] + 12, origin[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, _ARROW_COLOR, 2)
