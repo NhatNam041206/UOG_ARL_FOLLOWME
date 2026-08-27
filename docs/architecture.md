@@ -374,6 +374,341 @@ debugging without the rest of the pipeline:
 `build_face_registry.py` (Phase 2 — re-detect, align, embed, and write `registry_data/<person>.npz`).
 Splitting these lets you swap which photos back a registered person without re-running capture.
 
+## Class diagram
+
+Split into six focused diagrams rather than one giant one — a single diagram covering every class
+in the repo would be unreadable. Each groups classes that actually collaborate; a class named in
+more than one diagram (e.g. `TrackingResult`, `SteeringController`) is the same class, just shown
+from a different angle. `<<vendored>>` marks classes from `modules/autocar` (kept byte-for-byte
+unmodified — see "Repository layout" above); `<<module>>` marks a file that's a flat collection of
+functions, not an actual class, shown here anyway because other classes depend on it directly.
+
+### 1. Pre-trigger pipeline (`face_identity` → `human_detection_roi` → `gesture_hand_keypoint`)
+
+```mermaid
+classDiagram
+    class FaceIdentityResult {
+        +bool face_found
+        +Tuple face_bbox
+        +bool is_registered_match
+        +str matched_person_name
+        +float match_confidence
+        +float face_detection_confidence
+        +draw_debug(frame)
+    }
+    class FaceRegistry {
+        +__init__(registry_dir)
+    }
+    class HumanDetectionResult {
+        +bool person_found
+        +Tuple person_bbox
+        +float detection_confidence
+        +draw_debug(frame, face_bbox)
+    }
+    class GestureMethodResult {
+        +int track_id
+        +bool is_waving
+        +str waving_state
+        +str sequence_stage
+        +int open_count
+        +int close_count
+        +int total_confirmed_count
+        +float confidence_debug
+        +object keypoints_raw
+        +draw_debug(frame, person_bbox_full_frame)
+    }
+    class GestureHandKeypointPipeline {
+        -HandLandmarkerWrapper detector
+        -Dict~int,_TrackState~ _tracks
+        +evaluate(track_id, crop, ts, bbox) PipelineResult
+        +release_track(track_id)
+    }
+    class _TrackState {
+        +SequenceStateMachine sequence_machine
+        +ConfirmationTracker waving_tracker
+        +int total_confirmed_count
+    }
+    class SequenceStateMachine {
+        +str stage
+        +update(hand_shape, height_gate_pass, ts, config) str
+        +reset()
+    }
+    class ConfirmationTracker {
+        +update(condition, ts, config) str
+    }
+    class HandLandmarkerWrapper {
+        +detect(crop) List~DetectedHand~
+    }
+    class _GestureMethodAdapter {
+        <<main.py own copy, isolation convention>>
+        +evaluate(track_id, crop, ts, bbox) Tuple
+        +last_result GestureMethodResult
+    }
+
+    GestureHandKeypointPipeline "1" *-- "*" _TrackState : keyed by track_id
+    _TrackState *-- SequenceStateMachine
+    _TrackState *-- ConfirmationTracker
+    GestureHandKeypointPipeline *-- HandLandmarkerWrapper
+    GestureHandKeypointPipeline ..> GestureMethodResult : produces
+    _GestureMethodAdapter ..> GestureMethodResult : wraps interface.evaluate()
+    FaceIdentityResult ..> HumanDetectionResult : face_bbox feeds ROI
+    HumanDetectionResult ..> GestureMethodResult : person_bbox feeds gesture crop
+```
+
+### 2. Post-trigger — tracking, recovery & steering (`autocar_adapter` + vendored `modules/autocar`)
+
+```mermaid
+classDiagram
+    class TrackingResult {
+        +bool target_locked
+        +float horizontal_offset
+        +Tuple person_bbox
+        +str state
+        +bool just_reacquired
+        +draw_debug(frame)
+    }
+    class _AutocarEngine {
+        -YOLOv8PoseTorch detector
+        -OSNetEmbedder osnet_embedder
+        -FaceRecognizer face_recognizer
+        -BYTETracker tracker
+        -TargetLock lock
+        +start(person_name, bbox, frame, ts)
+        +update(frame, ts) TrackingResult
+        +warmup()
+    }
+    class TargetLock {
+        <<vendored>>
+        +int locked_track_id
+        +float last_verify_score
+        +update(tracks, frame) int
+    }
+    class BYTETracker {
+        <<vendored>>
+        +update(detections) List~TrackedObject~
+    }
+    class YOLOv8PoseTorch {
+        <<vendored>>
+        +detect(frame) List~Detection~
+    }
+    class OSNetEmbedder {
+        <<vendored>>
+        +embed(crop) ndarray
+    }
+    class FaceRecognizer {
+        <<vendored>>
+        +recognize(crop) float
+    }
+    class SteeringController {
+        +float kp
+        +float ki
+        +float kd
+        +float max_steering_angle_degrees
+        +float servo_center_degrees
+        +float fov_degrees
+        +is_calibrated() bool
+        +update(horizontal_offset, ts) float
+        +reset()
+    }
+    class FollowMeCommand {
+        +bool should_move
+        +float steering_angle_degrees
+        +str debug_state
+    }
+
+    _AutocarEngine *-- TargetLock
+    _AutocarEngine *-- BYTETracker
+    _AutocarEngine *-- YOLOv8PoseTorch
+    _AutocarEngine *-- OSNetEmbedder
+    _AutocarEngine *-- FaceRecognizer
+    _AutocarEngine ..> TrackingResult : produces
+    TrackingResult --> SteeringController : horizontal_offset
+    SteeringController ..> FollowMeCommand : steering_angle_degrees = servo_center_degrees plus-or-minus clamped PID error
+```
+
+### 3. `followme_orchestrator` — the composition root for the whole post-trigger phase
+
+```mermaid
+classDiagram
+    class FollowMeOrchestratorPipeline {
+        -FaceRegistry registry
+        -GestureMethodAdapter gesture_adapter
+        -SteeringController steering
+        -bool _tracking_active
+        -str _target_person_name
+        +step(frame, ts) PipelineResult
+        +debug_snapshot() dict
+        +draw_debug(frame)
+    }
+    class GestureMethodAdapter {
+        -GestureMethodResult _last_result
+        +evaluate(track_id, crop, ts, bbox) Tuple
+        +last_result GestureMethodResult
+        +draw_debug(crop, bbox)
+    }
+    class build_debug_snapshot {
+        <<module: debug_snapshot.py>>
+        +build_debug_snapshot(face, person, gesture, tracking) dict
+    }
+    class _AutocarEngine {
+        <<see diagram 2>>
+    }
+    class SteeringController {
+        <<see diagram 2>>
+    }
+    class FaceIdentityResult {
+        <<see diagram 1>>
+    }
+    class HumanDetectionResult {
+        <<see diagram 1>>
+    }
+    class FollowMeCommand {
+        <<see diagram 2>>
+    }
+
+    FollowMeOrchestratorPipeline *-- GestureMethodAdapter
+    FollowMeOrchestratorPipeline *-- SteeringController
+    FollowMeOrchestratorPipeline ..> _AutocarEngine : autocar_adapter.start()/update()
+    FollowMeOrchestratorPipeline ..> FaceIdentityResult : evaluate_face()
+    FollowMeOrchestratorPipeline ..> HumanDetectionResult : evaluate_person()
+    FollowMeOrchestratorPipeline ..> build_debug_snapshot : debug_snapshot()
+    FollowMeOrchestratorPipeline ..> FollowMeCommand : step() returns
+```
+
+### 4. Registration (Tkinter UI, headless CLI, and the interactive console)
+
+```mermaid
+classDiagram
+    class PersonStatus {
+        +str name
+        +int raw_front_count
+        +int raw_back_count
+        +int cropped_front_count
+        +int cropped_back_count
+        +bool has_face_registry
+        +bool has_target_profile
+        +ready_for_followme bool
+    }
+    class LiveSubjectDetector {
+        -YOLOv8PoseTorch _detector
+        +count_in_roi(frame, roi_percent) int
+    }
+    class CaptureWindow {
+        <<tk.Toplevel>>
+        -cv2.VideoCapture cap
+        -LiveSubjectDetector detector
+        -str _state
+        +_tick()
+        +_cancel()
+    }
+    class RegistrationApp {
+        <<tk.Tk>>
+        -str chosen_name
+        +_refresh()
+        +_start_capture(name)
+        +_on_delete()
+        +_on_follow_me()
+    }
+    class register_person_module {
+        <<module: register_person.py>>
+        +run(person_name, camera_index, ..., show, stream, logger) int
+        +run_interactive(camera_index, ..., stream, logger) (int, chosen_name)
+    }
+
+    RegistrationApp *-- CaptureWindow : opens one per capture session
+    CaptureWindow *-- LiveSubjectDetector
+    register_person_module ..> LiveSubjectDetector : run() constructs directly (no Tkinter)
+    register_person_module ..> PersonStatus : list/delete via registration_data
+```
+`run_interactive()` (the console's `register <name>` command) calls `run()` directly, unmodified
+— both are functions on this same module, not a class relationship, so not drawn as an arrow
+above; see [`plans/11_registration_interactive_console.md`](../plans/11_registration_interactive_console.md) §3.3.3.
+`run_interactive()`'s `follow <name>` command is the console's own equivalent of
+`RegistrationApp._on_follow_me()` above — both select a fully-registered person and hand that
+choice back to `main.py` to fall through into the shared followme camera loop (`chosen_name`
+return value here; `self.chosen_name` instance attribute there, since `mainloop()` returns
+nothing usable).
+
+### 5. Observability infrastructure (`run_logging.py`, `debug_stream.py`, `tail_log.py`)
+
+Cross-cutting — not tied to any one pipeline, used by `main.py`'s pretrigger/followme loops and
+by `register_person.py`'s headless/interactive paths alike. See
+[`plans/10_debug_logging_observability.md`](../plans/10_debug_logging_observability.md) and
+[`plans/11_registration_interactive_console.md`](../plans/11_registration_interactive_console.md).
+
+```mermaid
+classDiagram
+    class RunLogger {
+        -str run_dir
+        +start(mode, argv, source_desc, config_path) str
+        +log_frame(**fields)
+        +set_video_info(path, fps, resolution)
+        +set_stream_info(url)
+        +close(frame_count, exit_reason)
+    }
+    class DebugStreamServer {
+        -_FrameBuffer _buffer
+        -ThreadingHTTPServer _httpd
+        +start(port, host, throttle_every_n_frames, jpeg_quality) str
+        +update_frame(frame)
+        +stop()
+    }
+    class _FrameBuffer {
+        -bytes _jpeg
+        +set_frame(frame, quality)
+        +get_jpeg() bytes
+    }
+    class tail_log_module {
+        <<module: tail_log.py>>
+        +format_record(record) str
+        +find_latest_run(log_root) str
+        +tail_file(path, initial_lines) int
+    }
+
+    DebugStreamServer *-- _FrameBuffer
+    tail_log_module ..> RunLogger : reads decisions.jsonl RunLogger writes — READ ONLY, never mutates
+```
+
+### 6. Standalone / no live caller (kept as runnable tools, not wired into any pipeline)
+
+```mermaid
+classDiagram
+    class EStopDecision {
+        <<enumeration>>
+        GO
+        STOP
+        UNCERTAIN
+    }
+    class EStopOutput {
+        +EStopDecision decision
+        +str reason
+        +int triggering_track_id
+        +str zone
+        +float timestamp
+    }
+    class EmergencyStopModule {
+        +float last_latency_ms
+        +process_frame(frame) EStopOutput
+    }
+    class AppearanceVerifierResult {
+        +bool match_found
+        +float best_similarity_score
+        +int reference_frame_count
+    }
+    class PersonDetection {
+        +int track_id
+        +Tuple bbox
+        +float confidence
+    }
+    class HumanDetectionModule {
+        +detect(frame) List~PersonDetection~
+    }
+
+    EmergencyStopModule ..> EStopOutput : produces
+    EStopOutput --> EStopDecision
+    HumanDetectionModule ..> PersonDetection : produces
+```
+
 ## See also
 
 - [`docs/technologies.md`](technologies.md) — the concrete tech stack (models, libraries, why each was chosen)
