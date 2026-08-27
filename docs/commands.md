@@ -52,6 +52,11 @@ python main.py --mode camera --modules followme --stream
 # Register headlessly over SSH too (registration's capture window is no longer forced-on — see
 # --show below); --stream shows the live ROI/person-count overlay the same way
 python main.py --modules register --person-name Nam --stream
+
+# Also publish each frame's FollowMeCommand over MQTT to a Pi 4 motor controller (see
+# docs/mqtt_handoff_pi4.md) -- requires config/thresholds.yaml's mqtt_bridge.broker_host and
+# publish_hz to be set (both start null/fail-closed; publish() no-ops until then).
+python main.py --mode camera --modules followme --show --mqtt
 ```
 
 | Flag | Applies to | Meaning |
@@ -60,7 +65,8 @@ python main.py --modules register --person-name Nam --stream
 | `--camera-index N` | `--mode camera`, `register` | OS camera device index |
 | `--modules` | always | `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) \| `register` (**default**) — hands off to `register_person`, not a per-frame pipeline |
 | `--face-registry-dir` | `pretrigger \| followme` | Defaults to `modules/face_identity/registry_data` |
-| `--config` | `followme`, `register` | Defaults to `config/thresholds.yaml`, passed to `followme_orchestrator.configure()` or `register_person.run()` |
+| `--config` | `followme`, `register` | Defaults to `config/thresholds.yaml`, passed to `followme_orchestrator.configure()` or `register_person.run()`; also reused by `mqtt_bridge.configure()` when `--mqtt` is set |
+| `--mqtt` | `followme` | Publishes each frame's `FollowMeCommand` over MQTT via `modules.mqtt_bridge` — see `docs/mqtt_handoff_pi4.md`. Off by default; `mqtt_bridge`/`paho-mqtt` are never imported unless this is set. Fails closed (no-ops) while `mqtt_bridge.broker_host`/`publish_hz` are unset in `thresholds.yaml`. |
 | `--person-name` | `register` | Headless single-person registration, no UI. Omit to open the Tkinter UI. |
 | `--front-samples` / `--back-samples` | `register` | Sample counts per capture phase (default 15 each) |
 | `--then-followme` | `register --person-name` | On success, fall through into the same `followme` camera loop |

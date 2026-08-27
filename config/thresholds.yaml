@@ -108,6 +108,20 @@ autocar:
 
   recovery_timeout_seconds: null  # ours, not theirs — see docs/parameters.md
 
+# MQTT drive-command publisher (Rasp 5 -> Pi 4 motor controller) — see
+# docs/parameters.md#mqtt_bridge and docs/mqtt_handoff_pi4.md for the Pi 4 subscriber's copy of
+# the wire contract. Reuses steering.servo_center_degrees (above) for the "stopped" angle;
+# does NOT duplicate it here.
+mqtt_bridge:
+  broker_host: null          # REQUIRED — Pi 4's IP address on the shared network. Fail-closed
+                              # while null: configure() logs a warning, publish() always returns
+                              # False without attempting to connect.
+  broker_port: 1883
+  topic: "autobot/control/followme"
+  publish_hz: null           # REQUIRED, uncalibrated — starting range discussed: 5-15 Hz. Must be
+                              # empirically tuned against real servo response + network latency on
+                              # actual hardware, not assumed.
+
 # register_person.py's capture ROI — see docs/parameters.md#register_person-register_personpy--not-a-per-frame-pipeline-module.
 register_person:
   front_roi_percent: [0.20, 0.05, 0.80, 0.95]

@@ -493,6 +493,63 @@ possible). See [parameters.md](parameters.md#steering-plans08) and
 
 ---
 
+## `mqtt_bridge`
+
+**Pipeline position:** consumes `followme_orchestrator`'s per-frame `FollowMeCommand` from
+`main.py`'s own `followme` loop, one call per frame, entirely optional (only active with
+`--mqtt`). Publishes it over MQTT to a Pi 4 motor controller; nothing on the Pi 4 subscriber side
+is implemented here (see [`docs/mqtt_handoff_pi4.md`](mqtt_handoff_pi4.md)).
+
+**Purpose:** the wire bridge between this pipeline's host (Rasp 5) and the robot's motor
+controller (Pi 4) — the only thing standing between a calculated `FollowMeCommand` and an actual
+servo/motor. Does not touch `followme_orchestrator` or any other existing module — it only reads
+the typed `FollowMeCommand` object `main.py` already receives, per
+[`docs/architecture.md`](architecture.md)'s design rule #2 (own-instance isolation, only `main.py`
+composes across module boundaries).
+
+**Working principle:**
+1. `configure()` reads the `mqtt_bridge:` section of `thresholds.yaml` plus the existing
+   `steering.servo_center_degrees` key (reused, not duplicated). While `broker_host` or
+   `publish_hz` is `null`, the module stays uncalibrated: `publish()` always returns `False`
+   without attempting a connection — fail-closed, same convention as every other module.
+   Otherwise starts a `paho-mqtt` client asynchronously (`connect_async()` + `loop_start()`),
+   registering a Last Will and Testament (topic + a "stopped" payload) so an unclean disconnect
+   still leaves the Pi 4 side a stop command.
+2. `publish(command, timestamp)` rate-limits internally to `publish_hz` (safe to call every
+   frame), encodes `command` into the wire payload (`codec.py`), and publishes at QoS 0,
+   unretained. Never raises — a network error or encoding failure is logged and returns `False`.
+3. `close()` publishes one final explicit stop payload, then disconnects — called from
+   `main.py`'s existing cleanup path (normal exit or Ctrl+C), not a new signal handler.
+
+**Wire payload** (not JSON — a plain string, agreed for minimal parsing overhead on the Pi 4
+side): `"<servo_angle_pwm 0-180>,<is_moving 0|1>"`, e.g. `"95,1"`. `steering_angle_degrees` on
+`FollowMeCommand` is already the ABSOLUTE servo angle (confirmed against
+`SteeringController.update()`'s own docstring/return contract — no degrees-to-PWM scaling
+happens in `codec.py`, only rounding + a hard `[0, 180]` validity check that raises loudly on a
+miscalibrated `steering:` section rather than silently clamping). When `should_move` is `False`
+or the angle is `None`, the angle is always encoded as `servo_center_degrees` — never a stale
+value. `is_moving` maps directly from `should_move`, never inferred from the angle.
+
+**Public contract:** `configure(config_path)`, `publish(command, timestamp) -> bool`,
+`close()` — see `modules/mqtt_bridge/interface.py`'s own docstrings. No dataclass of its own; it
+consumes `followme_orchestrator.FollowMeCommand` directly.
+
+**Key parameters:** `mqtt_bridge.broker_host`/`publish_hz` (both required, fail-closed),
+`mqtt_bridge.broker_port`/`topic` (working defaults), plus the reused `steering.servo_center_degrees`.
+See [parameters.md](parameters.md#mqtt_bridge).
+
+**Known limitations (intentional):**
+- No speed/reverse field — `is_moving` is a plain boolean, matching `FollowMeCommand.should_move`
+  exactly; no new state introduced beyond what the orchestrator already decides.
+- The LWT only fires on a TCP disconnect (clean or unclean) — it does **not** cover the Rasp 5
+  process hanging while its socket to the broker stays open. That staleness case is explicitly
+  the Pi 4 subscriber's own responsibility (recommended: a local timeout on message age) — see
+  [`docs/mqtt_handoff_pi4.md`](mqtt_handoff_pi4.md).
+- `publish_hz` is uncalibrated at time of writing (`null`) — a starting range of 5–15 Hz was
+  discussed but not measured against real servo response + network latency on actual hardware.
+
+---
+
 ## See also
 
 - [`docs/architecture.md`](architecture.md) — how these modules are wired together, pipeline flow diagrams, cross-module design rules

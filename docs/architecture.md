@@ -61,6 +61,10 @@ modules/
                                    even a new file added to this directory. See "Post-trigger flow" below.
   followme_orchestrator/          Composes face-first + autocar_adapter (below) into one steppable
                                   step(frame, timestamp) -> FollowMeCommand — see below
+  mqtt_bridge/                    Publishes each frame's FollowMeCommand over MQTT to a Pi 4 motor
+                                  controller (--mqtt only) — consumes the typed FollowMeCommand
+                                  main.py already receives, no reach into followme_orchestrator's
+                                  internals. See docs/mqtt_handoff_pi4.md for the wire contract.
 ```
 
 Each module directory has exactly one importable file, `interface.py` — everything else in that
@@ -312,7 +316,8 @@ and `trajectory_verifier`/`gesture_trajectory_verifier`) were removed (confirmed
 | `--camera-index N` | OS camera device index; defaults to `config/thresholds.yaml`'s `camera.camera_index`, else `0` |
 | `--modules` | `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) \| `register` (**default**) — hands off to `register_person`, not a per-frame pipeline |
 | `--face-registry-dir` | Path to registered-person `.npz` files (`pretrigger`/`followme` only) |
-| `--config` | Path to `thresholds.yaml` — passed to `followme_orchestrator.configure()` (`followme`) or `register_person.run()` (`register`) |
+| `--config` | Path to `thresholds.yaml` — passed to `followme_orchestrator.configure()` (`followme`) or `register_person.run()` (`register`); also reused by `mqtt_bridge.configure()` when `--mqtt` is set |
+| `--mqtt` | `followme` only: publish each frame's `FollowMeCommand` over MQTT via `modules.mqtt_bridge` (see `docs/mqtt_handoff_pi4.md`). Off by default — `mqtt_bridge` (and `paho-mqtt`) is never imported unless this is set. |
 | `--person-name` | `register` only: headless single-person registration, no UI. Omit to open the Tkinter UI instead. |
 | `--front-samples` / `--back-samples` | `register` only: sample counts per capture phase (default 15 each) |
 | `--then-followme` | `register --person-name` (headless) only: on success, fall through into the same `followme` camera loop, no second command |

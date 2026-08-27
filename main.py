@@ -372,6 +372,12 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
 
     configure(thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
 
+    # Lazy import, only when --mqtt is set — so an environment without paho-mqtt installed is
+    # never affected by a plain (non-MQTT) followme run (see main.py's --mqtt help text).
+    if args.mqtt:
+        from modules.mqtt_bridge.interface import close as mqtt_close, configure as mqtt_configure, publish as mqtt_publish
+        mqtt_configure(args.config)
+
     video_writer = None
     if args.save_video:
         video_writer, video_path, fps, resolution = open_debug_video_writer(cap, logger.run_dir)
@@ -388,6 +394,8 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
             want_overlay = args.show or args.save_video or stream is not None  # draw even headlessly if saving/streaming
 
             command = step(frame, timestamp)
+            if args.mqtt:
+                mqtt_publish(command, timestamp)
             color = _FOLLOWME_STATE_COLOR.get(command.debug_state, (255, 255, 255))
             angle_str = f"{command.steering_angle_degrees:.1f}" if command.steering_angle_degrees is not None else "None"
             line = (
@@ -446,6 +454,8 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
             cv2.destroyAllWindows()
         if video_writer is not None:
             video_writer.release()
+        if args.mqtt:
+            mqtt_close()
         logger.close(frame_count=frame_idx, exit_reason=exit_reason)
 
     print(f"Processed {frame_idx} frames from {source_desc}.")
@@ -487,6 +497,15 @@ def main() -> int:
         "--config", default="config/thresholds.yaml",
         help="Path to thresholds.yaml. Used when --modules followme (passed through to "
              "modules.followme_orchestrator.configure()) or --modules register.",
+    )
+    parser.add_argument(
+        "--mqtt", action="store_true",
+        help="--modules followme only: publish each frame's FollowMeCommand over MQTT (see "
+             "modules/mqtt_bridge) for a Pi 4 motor controller to consume — see "
+             "docs/mqtt_handoff_pi4.md. Uses the SAME --config path as "
+             "modules.followme_orchestrator.configure() (mqtt_bridge's own mqtt_bridge: section). "
+             "Off by default; when omitted, mqtt_bridge is never imported and behavior is "
+             "identical to today.",
     )
     parser.add_argument(
         "--person-name",

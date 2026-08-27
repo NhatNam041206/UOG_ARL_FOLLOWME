@@ -8,10 +8,11 @@ the others.
 |---|---|
 | [`architecture.md`](architecture.md) | System overview, repository layout, cross-module design rules/conventions, pipeline flow diagrams (both `main.py` pipelines, stage-by-stage input/output), CLI usage, debug/visualization architecture |
 | [`technologies.md`](technologies.md) | The concrete tech stack — libraries, every model used (what it is, where it's from, why it was chosen), storage formats |
-| [`modules.md`](modules.md) | Per-module deep dive: purpose, working principle/algorithm, public contract (inputs/outputs), key parameters, known limitations, for all 11 modules |
+| [`modules.md`](modules.md) | Per-module deep dive: purpose, working principle/algorithm, public contract (inputs/outputs), key parameters, known limitations, for all 12 modules |
 | [`parameters.md`](parameters.md) | Every tunable value in `config/thresholds.yaml` — meaning, current value, calibration status (🔴 uncalibrated / 🟡 starting guess / 🟢 working default), tuning notes |
 | [`commands.md`](commands.md) | Every command to run — the full pipeline (`main.py`), and each module's standalone `test_*.py`/`visualize_*.py` tools, run independently |
 | [`overlay_colors.md`](overlay_colors.md) | Every debug-overlay color across every module — what it means, what's drawn, what it represents, including how colors are reused across layers when composited |
+| [`mqtt_handoff_pi4.md`](mqtt_handoff_pi4.md) | Not part of this reference set's usual structure — a standalone handoff note for the Pi 4 motor-controller owner, describing the `modules/mqtt_bridge` wire contract (topic, payload format, stop-signaling gaps) from the Rasp 5 side only |
 
 ## Suggested reading order
 

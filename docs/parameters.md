@@ -338,6 +338,23 @@ revisit them once the actual servo/Ackermann rig is in hand.
 
 ---
 
+## `mqtt_bridge` (`modules/mqtt_bridge`, `--mqtt` only)
+
+Publishes each frame's `FollowMeCommand` over MQTT to a Pi 4 motor controller — see
+`docs/modules.md#mqtt_bridge` and `docs/mqtt_handoff_pi4.md` for the wire contract. `broker_host`
+and `publish_hz` are both required; while either is `null`, `publish()` always returns `False`
+without attempting a broker connection (same fail-closed convention as every other module).
+`servo_center_degrees` is NOT duplicated here — it's read from the `steering` section above.
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `broker_host` | `null` | 🔴 | Pi 4's IP address on the shared network. | Set once the Pi 4's address on the shared network is known — not guessable/defaultable, since a wrong IP would silently fail to reach the right device. |
+| `broker_port` | 1883 | 🟢 | Standard unencrypted MQTT broker port. | Override only if the broker is configured on a non-standard port. |
+| `topic` | `"autobot/control/followme"` | 🟢 | MQTT topic both sides publish/subscribe to. | Override only if the Pi 4 subscriber is coded to expect a different topic string — keep both sides in sync (see `docs/mqtt_handoff_pi4.md`). |
+| `publish_hz` | `null` | 🔴 | How often `publish()` actually sends a message (internally rate-limited in `interface.py`, not the transport layer). | Starting range discussed: 5–15 Hz. Must be empirically tuned against real servo response + network latency on actual hardware — do not assume a value. |
+
+---
+
 ## How to actually calibrate
 
 1. **Run the relevant `visualize_*.py` / `test_*.py` tool** for the module you're tuning (see each
