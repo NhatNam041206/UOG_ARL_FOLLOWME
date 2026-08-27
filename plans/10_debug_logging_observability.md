@@ -4,6 +4,11 @@ Living doc for the run-logging/debug-observability work, tracked chunk by chunk 
 be verified independently as it lands. Updated after each chunk completes — re-read this file to
 see current status rather than scrolling chat history.
 
+See also [plans/11_registration_interactive_console.md](11_registration_interactive_console.md)
+— the follow-on plan for operating (not just watching) `register_person.py` over SSH. It reuses
+chunk 6 (`--stream`) unchanged and will extend chunk 4's `RunLogger` usage to `register` mode;
+its own §5 tracks exactly what that will change here, once implemented.
+
 ## Why
 
 Deployment target: this project lives in git, gets `git pull`ed onto a Raspberry Pi, and is
@@ -213,16 +218,34 @@ where its logs are landing, not just the existing mode banner.
   adapter) so `sequence_stage`/`open_count`/`close_count`/`total_confirmed_count_session` are
   available structured, not just baked into the printed `extra` string.
 - **Exit tracking**: both loops now track `exit_reason` (`"completed"` | `"user_quit"` on the `q`
-  keypress | `"error"` on an uncaught exception, re-raised after recording) and call
+  keypress or `Ctrl+C` | `"error"` on an uncaught exception, re-raised after recording) and call
   `logger.close(frame_count, exit_reason)` in `finally`, so `meta.json` always reflects how the run
-  actually ended, even after `Ctrl+C`-style interruption or a crash.
+  actually ended.
+
+**Correction, added later (prompted by "are there any legitimate ways to exit when --stream is
+enabled")**: the claim above — "even after Ctrl+C-style interruption" — was WRONG as originally
+written. `except Exception:` does **not** catch `KeyboardInterrupt` (it's a `BaseException`, not
+an `Exception`) — the `finally` cleanup (camera release, `stream.stop()`, `logger.close()`) did
+always run correctly, but the exception itself still propagated all the way out as a raw
+traceback, with no clean message and no `"user_quit"` recorded. This mattered in practice
+specifically for `--stream`-only headless runs (`--mode camera`, no `--show`): with no `--show`,
+`cv2.waitKey()` is never even called, so there is no `q`-keypress path at all — `Ctrl+C` was the
+**only** way to stop such a run early, and it produced a stack-trace dump instead of a clean exit.
+Fixed: added an explicit `except KeyboardInterrupt:` clause (before `except Exception:`) to both
+`run_pretrigger_pipeline()` and `run_followme_pipeline()` — prints `"Interrupted, stopping."` and
+records `exit_reason="user_quit"`, same as the `q`-keypress path, instead of letting it propagate.
 
 **Tests**: none new for this chunk specifically — it's wiring, not new logic, and covered
 transitively by chunks 1/3's own tests (the pieces being wired together). Verified with
 `python -m py_compile main.py` and `python -c "import main"` (main.py's own top-level imports are
 just `cv2`/`yaml`/`run_logging` — the heavy CV imports are deferred inside each pipeline function,
 so this import check passes even without mediapipe/onnxruntime installed) and
-`python main.py --help` to confirm the new `--log-dir` flag is wired into argparse correctly.
+`python main.py --help` to confirm the new `--log-dir` flag is wired into argparse correctly. The
+`KeyboardInterrupt` fix specifically could not be given an automated test in this dev environment
+(both pipeline functions need the full mediapipe/onnxruntime stack to even construct) — verified
+by code inspection only; see `test_register_person_keyboard_interrupt.py`
+(plans/11_registration_interactive_console.md) for the equivalent fix in `register_person.run()`,
+which COULD be fully tested since that function's camera/detector are injectable.
 
 **Verify yourself** (needs a real camera/video + all CV deps installed, which this dev environment
 lacks):
@@ -262,17 +285,73 @@ python -m pytest test_main_video_writer.py -v
 Expect `4 passed`. End-to-end (`--save-video` producing a real annotated clip from the live
 pipeline) needs the same real-camera/full-deps environment as chunk 4's verification.
 
-## Running everything already implemented (chunks 1-5) at once
+### Chunk 6 — `--stream` (dev-only, throttled MJPEG-over-HTTP) — ✅ DONE
+
+Scope grew beyond the original followme-only plan: registration (`register_person.py`) needed the
+same capability, and along the way I found its "headless" CLI path (`register_person.run()`,
+used by `main.py --modules register --person-name`) wasn't actually headless at all —
+`_capture_phase_cli()` called `cv2.imshow`/`cv2.waitKey` unconditionally, no `--show` gate
+existed. That's a real gap for the "test over SSH" goal, not just missing streaming, so it got
+fixed as part of this chunk rather than left for later.
+
+**New file** [debug_stream.py](../debug_stream.py) — stdlib-only (`http.server.ThreadingHTTPServer`,
+no new dependency — matches `docs/technologies.md`'s "hand-implemented over a library dependency"
+preference). `DebugStreamServer`: `start(port=8080) -> url` (binds `127.0.0.1` only, background
+daemon thread), `update_frame(frame)` (throttled — only every Nth call, default every 3rd, actually
+re-encodes/publishes, so it doesn't compete with inference for CPU), `stop()`. Serves
+`multipart/x-mixed-replace` JPEG at `/stream.mjpg` plus a trivial `/` viewer page.
+
+**`register_person.py`**: `_capture_phase_cli()`/`run()` now take `show`/`stream` params —
+`want_overlay = show or stream is not None`, so the capture loop can run with zero display
+attached. `run()`'s own default (`show=True`) preserves the standalone CLI's historical
+always-show behavior unchanged; only `main.py`'s dispatch passes `show=args.show` explicitly,
+aligning `register` with `pretrigger`/`followme`'s existing `--show` convention *within main.py
+specifically* — a deliberate, documented behavior change (see `docs/commands.md`'s `--show` row).
+Added `--stream` to `register_person.py`'s own `parse_args()` too.
+
+**`main.py`**: new `--stream` flag, applies to `pretrigger`/`followme`/`register --person-name`.
+`main()` starts one `DebugStreamServer` (when passed) right alongside the existing `RunLogger`,
+prints the URL the same way `logging to runs/...` prints, stops it in `finally`. Both pipeline
+functions gained a `stream` parameter; `want_overlay` now also fires on `stream is not None` (not
+just `--show`/`--save-video`), and `stream.update_frame(frame)` is pushed alongside
+`video_writer.write(frame)` — one drawn buffer, all three consumers (`--show`/`--save-video`/
+`--stream`) read from it.
+
+**Tests**: [test_debug_stream.py](../test_debug_stream.py) — 7 pytest unit tests against a real
+`DebugStreamServer` bound to an OS-assigned port (`port=0`), using real HTTP requests
+(`urllib.request`) — no camera/model dependency. Covers: localhost-only binding, index page,
+404 on unknown path, a pushed frame actually arriving as a real JPEG over the MJPEG stream,
+throttling skipping non-multiple pushes, `update_frame()`/`stop()` being safe to call before
+`start()`/twice. All passing.
+
+**Verify yourself**:
+```bash
+python -m pytest test_debug_stream.py -v
+```
+Expect `7 passed`. `register_person.py` and `main.py` both verified with `python -m py_compile`
+and a plain `import` (no missing-dependency errors — `register_person.py` imports cleanly in this
+dev environment, unlike anything touching mediapipe/onnxruntime). End-to-end (an actual browser
+watching a live camera run over an SSH port-forward) needs a real camera + full deps, same
+caveat as chunks 4-5.
+
+**Two bugs found and fixed after the initial chunk 6 landing, both from live testing (`python
+main.py --stream` still opening a window):**
+1. `register_person.py`'s own standalone `main()` never passed `show=` to `run()`, so it always
+   fell back to `run()`'s old `show=True` default regardless of `--stream` — added `--show` to
+   `register_person.py`'s own argparse, flipped `run()`'s default to `show=False` (both real call
+   sites now pass it explicitly, so the old default was a dangling footgun).
+2. `--stream` had no effect at all — silently — when `--modules register` was used without
+   `--person-name`, since that combination opens the Tkinter `RegistrationApp` instead, which
+   never reads `args.stream`. Worse than a silent no-op: a genuinely headless SSH session (no X11
+   forwarding — the exact case `--stream` exists for) would then fail/hang on
+   `RegistrationApp.mainloop()` needing a real display. Fixed as a fail-fast `parser.error()` at
+   argument-parsing time in `main.py`, before any Tkinter code runs, rather than a silent ignore.
+
+## Running everything already implemented (chunks 1-6) at once
 
 ```bash
-python -m pytest test_run_logging.py test_main_video_writer.py \
+python -m pytest test_run_logging.py test_main_video_writer.py test_debug_stream.py \
     modules/gesture_hand_keypoint/test_sequence_counts.py \
     modules/followme_orchestrator/test_debug_snapshot.py -v
 ```
-Expect `22 passed`.
-
-### Chunk 6 — `--stream` (dev-only, throttled MJPEG-over-HTTP) — deferred, not started
-
-Explicitly dev-tooling only per earlier discussion — not wired into the core `step()` path, lower
-priority than chunks 1-5 since it needs its own small HTTP server. Will scope separately once
-chunks 1-5 are confirmed working.
+Expect `29 passed`.

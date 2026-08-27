@@ -45,6 +45,13 @@ python main.py --mode video --video path/to/file.mp4 --modules followme --show -
 # save the annotated overlay as debug.avi, even with no window open. See "Reviewing a run" below.
 python main.py --mode camera --modules followme --save-video
 python main.py --mode camera --modules followme --save-video --log-dir /home/pi/followme_runs
+
+# Watch a headless run LIVE instead of only reviewing it afterward — see "Watching a run live" below
+python main.py --mode camera --modules followme --stream
+
+# Register headlessly over SSH too (registration's capture window is no longer forced-on — see
+# --show below); --stream shows the live ROI/person-count overlay the same way
+python main.py --modules register --person-name Nam --stream
 ```
 
 | Flag | Applies to | Meaning |
@@ -57,10 +64,12 @@ python main.py --mode camera --modules followme --save-video --log-dir /home/pi/
 | `--person-name` | `register` | Headless single-person registration, no UI. Omit to open the Tkinter UI. |
 | `--front-samples` / `--back-samples` | `register` | Sample counts per capture phase (default 15 each) |
 | `--then-followme` | `register --person-name` | On success, fall through into the same `followme` camera loop |
-| `--show` | always | Opens a display window (registration's own capture window always shows regardless) |
-| `--debug` | `pretrigger \| followme` | Full per-phase debug overlay — only visible combined with `--show` (or saved via `--save-video`, see below). `pretrigger`: face bbox + ROI + gesture keypoints/skeleton/state. `followme`: all of that PLUS `autocar_adapter`'s tracked bbox/center-line/state readout, via `modules.followme_orchestrator.draw_debug()`. |
+| `--show` | always | Opens a display window. `register`'s capture window used to ignore this flag entirely and always show (a real gap — a true SSH session with no display would hang here); both `main.py --modules register --person-name` and `register_person.py`'s own standalone CLI now gate it the same as `pretrigger`/`followme`, off by default. |
+| `--debug` | `pretrigger \| followme` | Full per-phase debug overlay — only visible combined with `--show` (or saved via `--save-video`/streamed via `--stream`, see below). `pretrigger`: face bbox + ROI + gesture keypoints/skeleton/state. `followme`: all of that PLUS `autocar_adapter`'s tracked bbox/center-line/state readout, via `modules.followme_orchestrator.draw_debug()`. |
 | `--save-video` | `pretrigger \| followme` | Saves the annotated debug overlay to `runs/<run_id>/debug.avi` (MJPG) — independent of `--show`, works headlessly over SSH. The overlay is drawn even without `--show` whenever this is set, so the saved video matches what `--debug`/`--show` would have displayed live. |
-| `--log-dir` | `pretrigger \| followme` | Where per-run structured logs are written (default `runs`). Always on — see "Reviewing a run" below. |
+| `--log-dir` | `pretrigger \| followme \| register --person-name` | Where per-run structured logs are written (default `runs`). Always on for these — see "Reviewing a run" below. |
+| `--stream` | `pretrigger \| followme \| register --person-name \| register --interactive` | Publishes the live debug overlay (or, for `register`, the ROI/person-count capture overlay) over HTTP at `127.0.0.1:8080` — see "Watching a run live" below. Independent of `--show`/`--save-video`; any combination works. **With `--modules register` and neither `--person-name` nor `--interactive` given, auto-selects `--interactive`** (prints a note explaining why) rather than erroring or silently falling through to the Tkinter UI, which has no streaming equivalent. |
+| `--interactive` | `register` | Opens the interactive registration console instead of the headless single-person path or the Tkinter UI — see "Registration console" below. Mutually exclusive with `--person-name` and `--then-followme` (use the console's own `follow <name>` command instead of `--then-followme` to pick who to follow). |
 
 `--modules followme` is a thin wrapper `main.py` puts around
 `modules.followme_orchestrator.interface` — the actual trigger → tracking → recovery → steering
@@ -80,8 +89,10 @@ cold-starts later, mid-session, at the exact moment a gesture trigger fires.
 
 ### Reviewing a run (`runs/<timestamp>_<mode>/` — plans/10_debug_logging_observability.md)
 
-Every `--modules pretrigger` or `--modules followme` run (`register` doesn't apply) writes a
-timestamped, self-contained folder, printed at startup as `logging to runs/...`:
+Every `--modules pretrigger`/`followme` run, and every `register --person-name` headless capture
+session (see `plans/11_registration_interactive_console.md` chunk 7 — the Tkinter UI still
+doesn't write one), writes a timestamped, self-contained folder, printed at startup as
+`logging to runs/...`:
 
 ```
 runs/20260826T210455Z_followme/
@@ -98,9 +109,48 @@ whole folder down and inspect it locally instead of needing a monitor on the Pi:
 ```bash
 scp -r pi@<host>:~/UOG_AIS_FOLLOWME/runs/20260826T210455Z_followme .
 python -c "import json; print(json.load(open('20260826T210455Z_followme/meta.json'))['exit_reason'])"
-tail -f runs/<latest>/decisions.jsonl   # while a run is still in progress, on the Pi itself
+python tail_log.py --latest             # pretty-printed live tail, on the Pi itself — see below
 ```
 `runs/` is gitignored — these are per-run artifacts, not project source.
+
+### Watching a run live (`--stream`, `debug_stream.py`)
+
+`--save-video`/`decisions.jsonl` are for reviewing a run **afterward** — `--stream` is for
+watching one **live**, as an alternative to `--show` when no display is attached (the normal case
+over SSH). It's dev-tooling only, deliberately not wired into any module's core pipeline path —
+see [`debug_stream.py`](../debug_stream.py)'s own docstring. Binds `127.0.0.1` only, never exposed
+on the network — view it through an SSH local port-forward:
+
+```bash
+# on your own machine, in a separate terminal, while the Pi run is active:
+ssh -L 8080:localhost:8080 pi@<host>
+# then open http://127.0.0.1:8080/ in a browser on your machine
+```
+
+**Stopping a `--stream`-only run** (no `--show`, so there's no `q`-keypress window to click into):
+`Ctrl+C` in the terminal running `main.py` is the legitimate way to stop it — it exits cleanly
+(camera released, stream/logger closed, `meta.json` records `exit_reason="user_quit"`), not as a
+raw crash/traceback. For `register_person.py --interactive` specifically, `Ctrl+C` is
+context-sensitive: pressed while a `register <name>` command is actively capturing, it cancels
+just that command and drops you back at the `>>>` prompt; pressed while idle at the prompt, it
+exits the whole console.
+
+Works for `pretrigger`/`followme` (the same annotated overlay `--save-video` would have written)
+and for `register --person-name` (the live ROI box + green/yellow person-count gate during
+capture — the same overlay `--show` would have displayed). Throttled by design (published at a
+reduced rate/JPEG quality, not full-rate) so it doesn't compete with the inference loop for CPU on
+a Pi; combine freely with `--show`/`--save-video`/`--log-dir` — none of them exclude each other.
+
+**`--modules register --stream` with neither `--person-name` nor `--interactive` auto-selects
+`--interactive`** — the Tkinter CRUD UI (registration's list/pick/re-capture/delete flow) already
+has its own live window and was deliberately never given a streaming equivalent, so it's the one
+`register` path `--stream` can never apply to (see `plans/10_debug_logging_observability.md`
+chunk 6). Rather than requiring `--interactive` to also be typed explicitly, `main.py` picks it
+for you and says so out loud:
+```
+Note: --stream needs --person-name or --interactive under --modules register; opening the
+interactive console (pass --interactive explicitly to skip this note).
+```
 
 ### Registering people (`register_person.py` / `--modules register`)
 
@@ -108,9 +158,79 @@ tail -f runs/<latest>/decisions.jsonl   # while a run is still in progress, on t
 # Tkinter CRUD app: register new people, or pick/re-capture/delete existing ones
 python register_person.py
 
-# Headless, one person, no UI
+# Headless, one person, no UI — --show off by default here too now (see the --show row above);
+# add --show to open a local window
 python register_person.py Nam --camera-index 0 [--front-samples 15] [--back-samples 15]
+
+# Same, but also/instead streamed over HTTP — see "Watching a run live" above
+python register_person.py Nam --stream
 ```
+
+### Registration console (`--interactive`)
+
+An interactive alternative to both of the above for a headless SSH session — list who's
+registered, register/re-register a person, or delete one, all from a plain text prompt, no
+display needed at all (plans/11_registration_interactive_console.md). Available both through
+`main.py` and through `register_person.py`'s own standalone CLI:
+
+```bash
+python main.py --modules register --interactive
+python main.py --modules register --interactive --stream   # + watch the live capture overlay in a browser
+python main.py --modules register --interactive --log-dir /home/pi/register_runs
+
+python register_person.py --interactive              # equivalent, standalone form
+python register_person.py --interactive --stream
+```
+`--interactive` is mutually exclusive with `--person-name` (both entry points reject the
+combination outright) and with `--then-followme` — `--then-followme` means "whoever was just
+registered", which doesn't resolve to a single person in a console session that can register
+zero, one, or many. Use the console's own `follow <name>` command instead — pick exactly who to
+follow, from the same prompt:
+
+```
+Registration console. Commands: list, register <name>, delete <name>, follow <name>, quit
+>>> list
+  Nam      front= 15 back= 15  ready=True
+>>> register Alice
+  FRONT: face the camera, stand inside the box. Need 15 samples — 'q' to stop early.
+    saved '...' (1/15)
+    ...
+  OK
+>>> delete Nam
+  Delete 'Nam'? [y/N] y
+  deleted
+>>> follow Alice
+  Selected 'Alice' — exiting console to start followme mode.
+
+'Alice' selected — continuing into followme mode.
+```
+`follow <name>` requires the person to already be fully registered (both a face registry entry
+and a target profile — `list`'s `ready=` column shows this); on an unready name it prints why and
+stays in the console instead of exiting. Only reaches followme mode through `main.py` — through
+`register_person.py`'s own standalone CLI, `follow` still selects the name and reports it, but
+that script has no camera-loop machinery of its own to continue into, same limitation as the
+`--person-name` path's own `--then-followme` — it tells you to relaunch via `main.py` instead.
+
+`--front-samples`/`--back-samples`/`--camera-index`/`--config` all apply the same way they do to
+the headless `<person_name>` form above — one fixed sample count for every `register <name>`
+command in the session, not overridable per-command. `Ctrl+C` mid-`register` cancels just that
+command and returns to the `>>>` prompt; `Ctrl+C` at an idle prompt exits the whole console.
+Logs the same way the headless form does — `runs/<timestamp>_register/decisions.jsonl` — but
+never prints them to this terminal; watch them live from a SECOND terminal/SSH session instead:
+
+```bash
+python tail_log.py --latest                       # auto-picks the run just started above
+python tail_log.py runs/20260827T120000Z_register/decisions.jsonl   # or point at one directly
+python tail_log.py --latest --lines 0               # skip history, only show new records
+```
+```
+Tailing runs/20260827T120000Z_register/decisions.jsonl — Ctrl+C to stop.
+[12:00:03.104] stage=capture person_name=Alice phase=front saved=1 samples_needed=15 person_count=1
+[12:00:04.110] stage=capture person_name=Alice phase=front saved=2 samples_needed=15 person_count=1
+```
+Works against ANY mode's log, not just `register` — `main.py --modules followme --log-dir ...`'s
+`decisions.jsonl` tails the same way. `Ctrl+C` stops watching cleanly (doesn't touch the run
+itself, which keeps going in its own terminal).
 
 Two capture phases per person — FRONT (face the camera) then BACK (turn around) — each saved as
 RAW frames first, then cropped to a configurable ROI (`config/thresholds.yaml`'s

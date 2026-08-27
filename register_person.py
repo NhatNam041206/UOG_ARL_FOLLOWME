@@ -65,7 +65,7 @@ import sys
 import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import yaml
@@ -73,7 +73,9 @@ from PIL import Image, ImageTk
 
 import registration_data as data
 import registration_overlay as overlay
+from debug_stream import DebugStreamServer
 from modules.face_identity.registry import sanitize_person_name
+from run_logging import RunLogger
 
 _CAPTURE_INTERVAL_SECONDS = 1.0  # gap between accepted samples, so they're not near-duplicate frames
 _COUNTDOWN_SECONDS = 3.0
@@ -96,17 +98,34 @@ def _load_roi_config(config_path: str):
 # --------------------------------------------------------------------------------------------
 
 def _capture_phase_cli(cap, detector: data.LiveSubjectDetector, roi_percent, instruction: str,
-                        name: str, phase: str, samples_needed: int) -> int:
+                        name: str, phase: str, samples_needed: int, show: bool,
+                        stream: Optional[DebugStreamServer], frame_idx: int,
+                        logger: Optional[RunLogger]) -> "tuple[int, int]":
+    """Returns (saved, frame_idx) — frame_idx is the running per-run() counter threaded through
+    both phase calls (front then back), so decisions.jsonl frame numbers are unique/monotonic
+    across the whole registration, not reset per phase (mirrors main.py's own frame_idx
+    convention in run_pretrigger_pipeline/run_followme_pipeline)."""
+    want_overlay = show or stream is not None  # draw even without a display if streaming
     start = time.time()
     while time.time() - start < _COUNTDOWN_SECONDS:
         ret, frame = cap.read()
         if not ret:
-            return 0
+            return 0, frame_idx
         remaining = _COUNTDOWN_SECONDS - (time.time() - start)
-        cv2.imshow(_WINDOW_NAME, overlay.draw_countdown(frame, roi_percent, instruction, remaining))
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            print("Stopped early.")
-            return 0
+        if want_overlay:
+            frame = overlay.draw_countdown(frame, roi_percent, instruction, remaining)
+        if stream is not None:
+            stream.update_frame(frame)
+        if logger is not None:
+            logger.log_frame(frame=frame_idx, ts=time.time(), mode="register", stage="countdown",
+                              person_name=name, phase=phase, saved=0, samples_needed=samples_needed,
+                              person_count=None)
+        frame_idx += 1
+        if show:
+            cv2.imshow(_WINDOW_NAME, frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("Stopped early.")
+                return 0, frame_idx
 
     saved, last_save_time, last_check_time, person_count = 0, 0.0, 0.0, 0
     while saved < samples_needed:
@@ -122,63 +141,251 @@ def _capture_phase_cli(cap, detector: data.LiveSubjectDetector, roi_percent, ins
             saved += 1
             last_save_time = now
             print(f"  saved '{path}' ({saved}/{samples_needed})")
-        cv2.imshow(_WINDOW_NAME, overlay.draw_capture(
-            frame, roi_percent, instruction, saved, samples_needed, person_count))
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            print("Stopped early.")
-            break
-    return saved
+        if want_overlay:
+            frame = overlay.draw_capture(frame, roi_percent, instruction, saved, samples_needed, person_count)
+        if stream is not None:
+            stream.update_frame(frame)
+        if logger is not None:
+            logger.log_frame(frame=frame_idx, ts=now, mode="register", stage="capture",
+                              person_name=name, phase=phase, saved=saved, samples_needed=samples_needed,
+                              person_count=person_count)
+        frame_idx += 1
+        if show:
+            cv2.imshow(_WINDOW_NAME, frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("Stopped early.")
+                break
+    return saved, frame_idx
 
 
 def run(person_name: str, camera_index: int = 0, front_samples: int = 15,
-        back_samples: int = 15, config_path: str = "config/thresholds.yaml") -> int:
+        back_samples: int = 15, config_path: str = "config/thresholds.yaml",
+        show: bool = False, stream: Optional[DebugStreamServer] = None,
+        logger: Optional[RunLogger] = None, close_logger_on_exit: bool = True) -> int:
     """The headless entry point for registering (or re-registering) ONE person via a plain cv2
-    window — main.py and this file's own standalone `<name>` CLI form both call this directly."""
+    window — main.py, this file's own standalone `<name>` CLI form, AND run_interactive() (the
+    REPL, chunk 8) all call this directly, all passing `show`/`stream`/`logger` explicitly (their
+    own --show/--stream/--log-dir flags, or the REPL's own shared instances).
+
+    `show` defaults to False (NOT this function's old always-on-window behavior — that was a real
+    gap: a true SSH session with no X11 forwarding would hang on cv2.imshow with no way to opt
+    out). Pass `show=True` to open a local display window. `stream`, if given, receives the same
+    ROI/person-count overlay frame `show` would have displayed, published live over HTTP (see
+    debug_stream.DebugStreamServer) — independent of `show`, so you can stream without a local
+    window, show a local window without streaming, both, or neither.
+
+    `logger`, if given, must already have had `.start(...)` called by the caller (mirrors
+    main.py's run_pretrigger_pipeline/run_followme_pipeline convention: caller starts, the
+    function that owns the frame loop closes) — this function calls `.close()` on it in its own
+    `finally`, once, covering both phases (plans/11_registration_interactive_console.md chunk 7)
+    — UNLESS `close_logger_on_exit=False`, needed by run_interactive() (chunk 8): the REPL shares
+    ONE logger/decisions.jsonl across MANY `register <name>` commands in one session, so no
+    single `run()` call may close it — the REPL itself owns closing it once, on exit. Headless
+    single-shot callers (main.py, this file's own CLI) leave this at its default `True`.
+    """
+    exit_reason = "completed"
+    frame_idx = 0
     try:
-        person_name = sanitize_person_name(person_name)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    data.reset_captures(person_name)  # "remove the old ones" — see module docstring
-    front_roi, back_roi = _load_roi_config(config_path)
-
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        print(f"ERROR: could not open camera index {camera_index}", file=sys.stderr)
-        return 1
-
-    print("Loading person detector (live single-person check)...")
-    detector = data.LiveSubjectDetector()
-
-    try:
-        print(f"FRONT: face the camera, stand inside the box. Need {front_samples} samples — 'q' to stop early.")
-        if _capture_phase_cli(cap, detector, front_roi, "FACE THE CAMERA", person_name, "front", front_samples) == 0:
-            print("ERROR: no FRONT samples captured.", file=sys.stderr)
+        try:
+            person_name = sanitize_person_name(person_name)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            exit_reason = "error"
             return 1
-        print("Phase 1/2 done.")
 
-        print(f"BACK: turn around, stand inside the box. Need {back_samples} samples — 'q' to stop early.")
-        if _capture_phase_cli(cap, detector, back_roi, "TURN AROUND - BACK TO CAMERA", person_name, "back", back_samples) == 0:
-            print("ERROR: no BACK samples captured.", file=sys.stderr)
+        data.reset_captures(person_name)  # "remove the old ones" — see module docstring
+        front_roi, back_roi = _load_roi_config(config_path)
+
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            print(f"ERROR: could not open camera index {camera_index}", file=sys.stderr)
+            exit_reason = "error"
             return 1
-        print("Phase 2/2 done.")
+
+        print("Loading person detector (live single-person check)...")
+        detector = data.LiveSubjectDetector()
+
+        try:
+            print(f"FRONT: face the camera, stand inside the box. Need {front_samples} samples — 'q' to stop early.")
+            saved, frame_idx = _capture_phase_cli(cap, detector, front_roi, "FACE THE CAMERA", person_name,
+                                                   "front", front_samples, show, stream, frame_idx, logger)
+            if saved == 0:
+                print("ERROR: no FRONT samples captured.", file=sys.stderr)
+                exit_reason = "stopped_early"
+                return 1
+            print("Phase 1/2 done.")
+
+            print(f"BACK: turn around, stand inside the box. Need {back_samples} samples — 'q' to stop early.")
+            saved, frame_idx = _capture_phase_cli(cap, detector, back_roi, "TURN AROUND - BACK TO CAMERA",
+                                                   person_name, "back", back_samples, show, stream, frame_idx, logger)
+            if saved == 0:
+                print("ERROR: no BACK samples captured.", file=sys.stderr)
+                exit_reason = "stopped_early"
+                return 1
+            print("Phase 2/2 done.")
+        finally:
+            cap.release()
+            if show:
+                cv2.destroyAllWindows()
+
+        front_cropped = data.build_cropped_roi(person_name, "front", front_roi)
+        back_cropped = data.build_cropped_roi(person_name, "back", back_roi)
+        print(
+            f"\nCropped {front_cropped} front + {back_cropped} back image(s) — see "
+            f"'registration_captures/{person_name}/cropped/' to check them before the build below uses them."
+        )
+
+        if data.rebuild_registries(person_name, config_path):
+            print(f"\nDone: '{person_name}' is registered for both pipelines.")
+            return 0
+        print("\nDone with errors — see build output above.")
+        exit_reason = "error"
+        return 1
+    except KeyboardInterrupt:
+        # Caught HERE, not just at the top-level caller, deliberately: this makes Ctrl+C mean
+        # "cancel THIS registration" in both callers, not "always kill the whole process" — the
+        # one-shot CLI path (main.py, this file's own <person_name> form) has nothing left to do
+        # after a cancelled registration anyway, so returning 1 ends it just the same either way;
+        # but run_interactive() (chunk 8) calls run() from inside its own command loop, where
+        # catching it here means Ctrl+C during an active `register <name>` cancels only that
+        # command and returns control to the REPL's own >>> prompt — Ctrl+C while just sitting at
+        # the prompt (no registration in progress) is a SEPARATE catch, in run_interactive()
+        # itself, and means "exit the whole console" instead. Same keystroke, different meaning,
+        # by design — whichever operation is actually running gets cancelled, nothing more.
+        print("\nRegistration cancelled (Ctrl+C).")
+        exit_reason = "stopped_early"
+        return 1
+    except Exception:
+        exit_reason = "error"
+        raise
     finally:
-        cap.release()
-        cv2.destroyAllWindows()
+        if logger is not None and close_logger_on_exit:
+            logger.close(frame_count=frame_idx, exit_reason=exit_reason)
 
-    front_cropped = data.build_cropped_roi(person_name, "front", front_roi)
-    back_cropped = data.build_cropped_roi(person_name, "back", back_roi)
-    print(
-        f"\nCropped {front_cropped} front + {back_cropped} back image(s) — see "
-        f"'registration_captures/{person_name}/cropped/' to check them before the build below uses them."
-    )
 
-    if data.rebuild_registries(person_name, config_path):
-        print(f"\nDone: '{person_name}' is registered for both pipelines.")
-        return 0
-    print("\nDone with errors — see build output above.")
-    return 1
+# --------------------------------------------------------------------------------------------
+# Interactive console path — operates registration (list/register/delete) over a plain SSH
+# session, no display needed at all. See plans/11_registration_interactive_console.md.
+# --------------------------------------------------------------------------------------------
+
+def run_interactive(camera_index: int = 0, front_samples: int = 15, back_samples: int = 15,
+                     config_path: str = "config/thresholds.yaml",
+                     stream: Optional[DebugStreamServer] = None,
+                     logger: Optional[RunLogger] = None) -> Tuple[int, Optional[str]]:
+    """
+    Interactive registration console (plans/11_registration_interactive_console.md chunk 8) — a
+    REPL for operating registration over a plain SSH session, no display needed at all:
+    `list` (Read), `register <name>` (Create/Update — calls run() completely unchanged), `delete
+    <name>` (Delete), `follow <name>` (select a fully-registered person and exit — the console's
+    equivalent of the Tkinter UI's "Follow Me" button, see below), `quit`/`exit`/Ctrl+D to stop
+    without selecting anyone.
+
+    Returns `(exit_code, chosen_name)` — `chosen_name` is `None` unless `follow <name>` was used,
+    mirroring `RegistrationApp.chosen_name` (an instance attribute there, since Tkinter's own
+    `mainloop()` returns nothing useful; a return value here, since this is a plain function) —
+    see that class's own `_on_follow_me()` for the exact parallel. The caller (`main.py`'s
+    `--interactive` dispatch) reads `chosen_name` the same way it already reads
+    `RegistrationApp.chosen_name`, falling through into the SAME followme camera loop the other
+    two register paths share.
+
+    Architecture (plans/11 §3): this is the ONLY writer among the three channels that plan
+    describes. `stream`, if given, is passed straight through to run() for each `register`
+    command — the exact same live overlay the headless --person-name path already publishes,
+    completely unmodified (invariant §3.3.1/§3.3.4 — never repurposed as a control channel here).
+    `logger`, if given, must already be started by the caller (same convention as run()) — this
+    function owns it for the WHOLE session and closes it once, on exit (not per-command); each
+    `register <name>` command therefore passes close_logger_on_exit=False into run() to keep the
+    shared decisions.jsonl open across multiple commands (see run()'s own docstring).
+
+    MVP scope, deliberately deferred not forgotten (plans/11 §3.3.7): no per-command sample-count
+    override (uses the session-wide front_samples/back_samples); no `stop` command — a REPL
+    command already blocks synchronously, so Ctrl+C is the natural cancel, caught below and
+    exits cleanly rather than as a raw traceback; no camera auto-reconnect. Each `register <name>`
+    command's own logged frame numbers restart at 0 per command (not threaded globally across an
+    entire REPL session) — an accepted simplification: every record still carries a real `ts`
+    timestamp plus `person_name`/`phase`/`command_index` for disambiguation, so log ordering is
+    never actually ambiguous, just not globally-sequential in the `frame` field specifically.
+    """
+    print("Registration console. Commands: list, register <name>, delete <name>, follow <name>, quit")
+    command_index = 0
+    chosen_name: Optional[str] = None
+    exit_reason = "user_quit"  # every normal way this loop ends (quit/exit/follow/EOF/Ctrl+C) IS a user quit
+    try:
+        while True:
+            try:
+                line = input(">>> ").strip()
+            except EOFError:
+                print()
+                break
+
+            if not line:
+                continue
+            parts = line.split()
+            cmd = parts[0].lower()
+
+            if cmd in ("quit", "exit"):
+                break
+
+            elif cmd == "list":
+                people = data.list_people()
+                if not people:
+                    print("  (no one registered yet)")
+                for p in people:
+                    print(f"  {p.name:20s} front={p.cropped_front_count:3d} back={p.cropped_back_count:3d} "
+                          f"ready={p.ready_for_followme}")
+                if logger is not None:
+                    logger.log_frame(ts=time.time(), mode="register", stage="list",
+                                      command_index=command_index, people_count=len(people))
+                command_index += 1
+
+            elif cmd == "register" and len(parts) >= 2:
+                name = parts[1]
+                result = run(name, camera_index, front_samples, back_samples, config_path,
+                             show=False, stream=stream, logger=logger, close_logger_on_exit=False)
+                print("OK" if result == 0 else "FAILED")
+                command_index += 1
+
+            elif cmd == "delete" and len(parts) >= 2:
+                name = parts[1]
+                confirmed = input(f"Delete '{name}'? [y/N] ").strip().lower() == "y"
+                if confirmed:
+                    data.delete_person(name)
+                    print("deleted")
+                else:
+                    print("cancelled")
+                if logger is not None:
+                    logger.log_frame(ts=time.time(), mode="register", stage="delete",
+                                      command_index=command_index, person_name=name, confirmed=confirmed)
+                command_index += 1
+
+            elif cmd == "follow" and len(parts) >= 2:
+                name = parts[1]
+                status = data.get_status(name)
+                if not status.ready_for_followme:
+                    print(f"'{name}' isn't fully registered yet — needs both a face registry "
+                          f"entry and a target profile. Use 'register {name}' first.")
+                else:
+                    chosen_name = name
+                    print(f"Selected '{name}' — exiting console to start followme mode.")
+                if logger is not None:
+                    logger.log_frame(ts=time.time(), mode="register", stage="follow",
+                                      command_index=command_index, person_name=name,
+                                      accepted=chosen_name == name)
+                command_index += 1
+                if chosen_name is not None:
+                    break
+
+            else:
+                print("Unknown command. Commands: list, register <name>, delete <name>, follow <name>, quit")
+    except KeyboardInterrupt:
+        print("\nInterrupted, exiting.")
+    except Exception:
+        exit_reason = "error"
+        raise
+    finally:
+        if logger is not None:
+            logger.close(frame_count=command_index, exit_reason=exit_reason)
+    return 0, chosen_name
 
 
 # --------------------------------------------------------------------------------------------
@@ -477,13 +684,79 @@ def parse_args():
     parser.add_argument("--front-samples", type=int, default=15)
     parser.add_argument("--back-samples", type=int, default=15)
     parser.add_argument("--config", default="config/thresholds.yaml")
+    parser.add_argument(
+        "--show", action="store_true",
+        help="Open a local display window for the capture overlay (ROI box + person-count gate). "
+             "Off by default — same convention as main.py's own --show — since a real SSH "
+             "session with no X11 forwarding would otherwise hang here. Independent of --stream: "
+             "use either, both, or neither.",
+    )
+    parser.add_argument(
+        "--stream", action="store_true",
+        help="Also publish the live capture overlay (ROI box + person-count gate) over HTTP at "
+             "127.0.0.1:8080, for watching a headless (no local display) capture session over an "
+             "SSH port-forward. Independent of --show.",
+    )
+    parser.add_argument(
+        "--log-dir", default="runs",
+        help="Directory to write per-run structured logs into (runs/<timestamp>_register/"
+             "meta.json + decisions.jsonl — same convention as main.py's pretrigger/followme "
+             "runs, see plans/10_debug_logging_observability.md and "
+             "plans/11_registration_interactive_console.md chunks 7-8). Always on for the "
+             "headless <person_name>/--interactive paths — this is what makes a headless SSH "
+             "session reviewable afterward without --show.",
+    )
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="Open an interactive registration console instead (list/register <name>/delete "
+             "<name>/quit) — operate registration over a plain SSH session, no display needed at "
+             "all. See plans/11_registration_interactive_console.md. Mutually exclusive with "
+             "passing a person_name positionally.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.interactive and args.person_name:
+        print("ERROR: --interactive and a positional person_name are mutually exclusive.", file=sys.stderr)
+        return 1
+
+    if args.interactive:
+        stream = DebugStreamServer() if args.stream else None
+        if stream is not None:
+            print(f"streaming to {stream.start()}")
+        logger = RunLogger(log_root=args.log_dir)
+        run_dir = logger.start("register", sys.argv[1:], f"camera:{args.camera_index}", args.config)
+        print(f"logging to {run_dir}")
+        try:
+            result, chosen_name = run_interactive(args.camera_index, args.front_samples, args.back_samples,
+                                                    args.config, stream=stream, logger=logger)
+        finally:
+            if stream is not None:
+                stream.stop()
+        if chosen_name:
+            # Same limitation as the --person-name path just below: this standalone script has
+            # no camera-loop machinery of its own to hand a chosen person off to. Unlike that
+            # path, run_interactive() already offered 'follow <name>' inside the console itself —
+            # tell the operator to relaunch through main.py to actually act on that choice.
+            print(f"\n'{chosen_name}' selected — relaunch with `python main.py --modules register "
+                  f"--interactive` to continue into followme mode with this console.")
+        return result
+
     if args.person_name:
-        return run(args.person_name, args.camera_index, args.front_samples, args.back_samples, args.config)
+        stream = DebugStreamServer() if args.stream else None
+        if stream is not None:
+            print(f"streaming to {stream.start()}")
+        logger = RunLogger(log_root=args.log_dir)
+        run_dir = logger.start("register", sys.argv[1:], f"camera:{args.camera_index}", args.config)
+        print(f"logging to {run_dir}")
+        try:
+            return run(args.person_name, args.camera_index, args.front_samples, args.back_samples,
+                       args.config, show=args.show, stream=stream, logger=logger)
+        finally:
+            if stream is not None:
+                stream.stop()
     # can_follow_me=False (default) when launched standalone — this file has no camera-loop
     # machinery of its own to hand a chosen person off to; "Follow Me" tells the operator to use
     # `python main.py --modules register` instead, which does.

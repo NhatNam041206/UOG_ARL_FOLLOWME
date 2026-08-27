@@ -69,10 +69,12 @@ import argparse
 import os
 import sys
 import time
+from typing import Optional
 
 import cv2
 import yaml
 
+from debug_stream import DebugStreamServer
 from run_logging import RunLogger
 
 _WAVE_STATE_COLOR = {"RED": (0, 0, 255), "YELLOW": (0, 220, 255), "GREEN": (0, 200, 0)}
@@ -174,7 +176,8 @@ class _GestureMethodAdapter:
         self._module.release_track(track_id)
 
 
-def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str, logger: RunLogger) -> int:
+def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str, logger: RunLogger,
+                             stream: Optional[DebugStreamServer] = None) -> int:
     """
     --modules pretrigger — the exploratory pipeline from plans/01-04, stopping at the trigger:
         full frame -> face detect+match -> ROI-scoped human detection -> chosen gesture method
@@ -204,7 +207,7 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str, log
                 break
             timestamp = time.time()
             frame_h, frame_w = frame.shape[:2]
-            want_overlay = args.show or args.save_video  # draw even headlessly if saving video
+            want_overlay = args.show or args.save_video or stream is not None  # draw even headlessly if saving/streaming
 
             face_results = [r for r in evaluate_face(frame, face_registry) if r.is_registered_match]
             line = f"mode=PRETRIGGER frame={frame_idx:06d} faces_matched={len(face_results)}"
@@ -295,6 +298,8 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str, log
 
             if video_writer is not None:
                 video_writer.write(frame)
+            if stream is not None:
+                stream.update_frame(frame)
 
             if args.show:
                 cv2.imshow("main (pretrigger pipeline)", frame)
@@ -303,6 +308,15 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str, log
                     break
 
             frame_idx += 1
+    except KeyboardInterrupt:
+        # A legitimate way to stop a headless run: with no --show, there's no 'q'-key path at
+        # all (cv2.waitKey() is never even called), so Ctrl+C is the ONLY way to stop a --mode
+        # camera run early. KeyboardInterrupt is a BaseException, not an Exception — the
+        # `except Exception` clause below never catches it, so without this it would propagate
+        # as a raw traceback instead of exiting cleanly (the `finally` cleanup below still runs
+        # either way — this is about the exit message/reason, not resource safety).
+        print("\nInterrupted, stopping.")
+        exit_reason = "user_quit"
     except Exception:
         exit_reason = "error"
         raise
@@ -328,7 +342,8 @@ _FOLLOWME_STATE_COLOR = {
 }
 
 
-def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logger: RunLogger) -> int:
+def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logger: RunLogger,
+                           stream: Optional[DebugStreamServer] = None) -> int:
     """
     --modules followme — the FULL pipeline (plans/01-08): everything run_pretrigger_pipeline()
     above does, continuing PAST the trigger into modules.followme_orchestrator — tracking +
@@ -370,7 +385,7 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
             if not ret:
                 break
             timestamp = time.time()
-            want_overlay = args.show or args.save_video  # draw even headlessly if saving video
+            want_overlay = args.show or args.save_video or stream is not None  # draw even headlessly if saving/streaming
 
             command = step(frame, timestamp)
             color = _FOLLOWME_STATE_COLOR.get(command.debug_state, (255, 255, 255))
@@ -403,6 +418,8 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
 
             if video_writer is not None:
                 video_writer.write(frame)
+            if stream is not None:
+                stream.update_frame(frame)
 
             if args.show:
                 cv2.imshow("main (followme pipeline)", frame)
@@ -411,6 +428,15 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
                     break
 
             frame_idx += 1
+    except KeyboardInterrupt:
+        # A legitimate way to stop a headless run: with no --show, there's no 'q'-key path at
+        # all (cv2.waitKey() is never even called), so Ctrl+C is the ONLY way to stop a --mode
+        # camera run early. KeyboardInterrupt is a BaseException, not an Exception — the
+        # `except Exception` clause below never catches it, so without this it would propagate
+        # as a raw traceback instead of exiting cleanly (the `finally` cleanup below still runs
+        # either way — this is about the exit message/reason, not resource safety).
+        print("\nInterrupted, stopping.")
+        exit_reason = "user_quit"
     except Exception:
         exit_reason = "error"
         raise
@@ -466,7 +492,16 @@ def main() -> int:
         "--person-name",
         help="--modules register only: register just this one person headlessly, no UI. Omit "
              "entirely to open the Tkinter registration UI instead (list/register/re-capture/"
-             "delete people interactively).",
+             "delete people interactively). Mutually exclusive with --interactive.",
+    )
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="--modules register only: open an interactive console instead (list/register "
+             "<name>/delete <name>/quit) — the headless equivalent of the Tkinter UI's CRUD, no "
+             "display needed at all. See plans/11_registration_interactive_console.md and "
+             "docs/commands.md's \"Registration console\" section. Mutually exclusive with "
+             "--person-name and --then-followme (no single person is chosen in a console "
+             "session, unlike the other two register paths).",
     )
     parser.add_argument(
         "--front-samples", type=int, default=15,
@@ -482,7 +517,7 @@ def main() -> int:
              "immediately continue into camera followme mode (as if --mode camera --modules "
              "followme had been run right after). Skipped entirely if registration itself fails. "
              "The UI path (no --person-name) does this interactively instead, via its own "
-             "\"Follow Me\" button.",
+             "\"Follow Me\" button. Not supported with --interactive.",
     )
     parser.add_argument(
         "--debug", action="store_true",
@@ -504,19 +539,88 @@ def main() -> int:
         "--log-dir", default="runs",
         help="Directory to write per-run structured logs into (runs/<timestamp>_<mode>/"
              "meta.json + decisions.jsonl — see plans/10_debug_logging_observability.md). Used "
-             "when --modules pretrigger or followme. Always on — this is what makes a headless "
-             "SSH run reviewable afterward without --show.",
+             "when --modules pretrigger, followme, or register --person-name (see "
+             "plans/11_registration_interactive_console.md chunk 7). Always on — this is what "
+             "makes a headless SSH run reviewable afterward without --show.",
+    )
+    parser.add_argument(
+        "--stream", action="store_true",
+        help="Publish the live debug overlay over HTTP at 127.0.0.1:8080 (see debug_stream.py) — "
+             "for watching a headless SSH run live, as an alternative to --show which needs a "
+             "display attached. View via an SSH local port-forward "
+             "(ssh -L 8080:localhost:8080 <host>), then open http://127.0.0.1:8080/. Independent "
+             "of --show/--save-video — any combination works. Used for --modules pretrigger, "
+             "followme, or register --person-name (registration's ROI/person-count capture "
+             "overlay, which also gains --show gating from this same change — see "
+             "register_person.py's own run()).",
     )
     args = parser.parse_args()
+
+    if args.interactive and args.person_name:
+        parser.error("--interactive and --person-name are mutually exclusive.")
+    if args.interactive and args.then_followme:
+        parser.error(
+            "--then-followme has no meaning with --interactive: it means \"whoever was just "
+            "registered\", but a console session can register zero, one, or many people. Use the "
+            "console's own 'follow <name>' command instead to pick exactly who to follow."
+        )
+    if args.stream and args.modules == "register" and not args.person_name and not args.interactive:
+        # Auto-select the interactive console rather than erroring: --stream's whole point is a
+        # headless-capable path, and between the two headless-capable register paths, the console
+        # is the strictly more capable one (list/register/delete/follow) — there's no reason to
+        # force the operator to also type --interactive by hand just to unblock --stream on its
+        # own. Still explicit in the printed output, not silent, so it's never a surprise.
+        args.interactive = True
+        print("Note: --stream needs --person-name or --interactive under --modules register; "
+              "opening the interactive console (pass --interactive explicitly to skip this note).")
 
     if args.modules == "register":
         import register_person
 
-        if args.person_name:
-            # Headless path — register exactly this one person, no GUI.
-            result = register_person.run(
-                args.person_name, args.camera_index, args.front_samples, args.back_samples, args.config,
-            )
+        if args.interactive:
+            # Interactive console path — the headless equivalent of the Tkinter UI's CRUD, now
+            # including its own 'follow <name>' command (register_person.run_interactive()) as
+            # the console's answer to Tkinter's "Follow Me" button — see that function's own
+            # docstring. chosen_name is None unless 'follow <name>' was used, in which case this
+            # falls through into the SAME followme camera loop the other two register paths
+            # share, exactly like they do.
+            stream = DebugStreamServer() if args.stream else None
+            if stream is not None:
+                print(f"streaming to {stream.start()}")
+            logger = RunLogger(log_root=args.log_dir)
+            run_dir = logger.start("register", sys.argv[1:], f"camera:{args.camera_index}", args.config)
+            print(f"logging to {run_dir}")
+            try:
+                result, chosen_name = register_person.run_interactive(
+                    args.camera_index, args.front_samples, args.back_samples, args.config,
+                    stream=stream, logger=logger,
+                )
+            finally:
+                if stream is not None:
+                    stream.stop()
+            if result != 0 or not chosen_name:
+                return result
+            print(f"\n'{chosen_name}' selected — continuing into followme mode.")
+
+        elif args.person_name:
+            # Headless path — register exactly this one person, no GUI. show=args.show, same
+            # --show convention as pretrigger/followme (register_person.run()'s own default is
+            # also False now — see that function's docstring for why the old always-show default
+            # was a real gap, not just a style choice).
+            stream = DebugStreamServer() if args.stream else None
+            if stream is not None:
+                print(f"streaming to {stream.start()}")
+            logger = RunLogger(log_root=args.log_dir)
+            run_dir = logger.start("register", sys.argv[1:], f"camera:{args.camera_index}", args.config)
+            print(f"logging to {run_dir}")
+            try:
+                result = register_person.run(
+                    args.person_name, args.camera_index, args.front_samples, args.back_samples,
+                    args.config, show=args.show, stream=stream, logger=logger,
+                )
+            finally:
+                if stream is not None:
+                    stream.stop()
             if result != 0 or not args.then_followme:
                 return result
             chosen_name = args.person_name
@@ -565,9 +669,19 @@ def main() -> int:
     run_dir = logger.start(args.modules, sys.argv[1:], source_desc, args.config)
     print(f"logging to {run_dir}")
 
-    if args.modules == "pretrigger":
-        return run_pretrigger_pipeline(cap, args, source_desc, logger)
-    return run_followme_pipeline(cap, args, source_desc, logger)
+    stream = DebugStreamServer() if args.stream else None
+    if stream is not None:
+        stream_url = stream.start()
+        logger.set_stream_info(stream_url)
+        print(f"streaming to {stream_url}")
+
+    try:
+        if args.modules == "pretrigger":
+            return run_pretrigger_pipeline(cap, args, source_desc, logger, stream)
+        return run_followme_pipeline(cap, args, source_desc, logger, stream)
+    finally:
+        if stream is not None:
+            stream.stop()
 
 
 if __name__ == "__main__":
