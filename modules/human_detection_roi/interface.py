@@ -30,12 +30,17 @@ reports person_found=False. It does NOT silently retry against the full frame.
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import cv2
 import numpy as np
 
 from .config import HumanDetectionROIConfig, load_config
 from .pipeline import HumanDetectionROIPipeline
+from .roi import compute_roi
 
 __all__ = ["HumanDetectionResult", "evaluate", "configure"]
+
+_ROI_COLOR = (0, 220, 255)      # yellow
+_PERSON_COLOR = (0, 200, 0)     # green
 
 
 @dataclass
@@ -43,6 +48,29 @@ class HumanDetectionResult:
     person_found: bool
     person_bbox: Optional[Tuple[int, int, int, int]]  # (x, y, w, h), FULL FRAME pixel space
     detection_confidence: Optional[float]
+
+    def draw_debug(self, frame: np.ndarray, matched_face_bbox: Tuple[int, int, int, int]) -> None:
+        """
+        Draws the computed ROI search region (yellow) — recomputed from `matched_face_bbox` +
+        this module's OWN config, the same call evaluate() itself made internally — and the
+        final detected person bbox (green), directly onto `frame` (full-frame coordinates).
+        `matched_face_bbox` must be the SAME bbox passed to the evaluate() call that produced
+        this result, or the ROI drawn here won't match what was actually searched. Externally
+        callable so any caller gets the identical overlay
+        modules/human_detection_roi/visualize_human_detection_roi.py already draws, without
+        re-implementing it. No-ops (ROI only) if config isn't calibrated yet.
+        """
+        config = _get_pipeline().config
+        if config.roi_expansion_factor is not None:
+            rx1, ry1, rx2, ry2 = compute_roi(
+                matched_face_bbox, frame.shape, config.roi_expansion_factor,
+                upward_fraction=config.roi_upward_fraction, width_fraction=config.roi_width_fraction,
+            )
+            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), _ROI_COLOR, 2)
+
+        if self.person_found and self.person_bbox is not None:
+            px, py, pw, ph = self.person_bbox
+            cv2.rectangle(frame, (px, py), (px + pw, py + ph), _PERSON_COLOR, 2)
 
 
 _pipeline_singleton: Optional[HumanDetectionROIPipeline] = None

@@ -21,13 +21,9 @@ import sys
 import cv2
 
 from modules.face_identity.interface import FaceRegistry, evaluate as evaluate_face
-from modules.human_detection_roi.config import load_config
 from modules.human_detection_roi.interface import evaluate as evaluate_person
-from modules.human_detection_roi.roi import compute_roi
 
 _FACE_COLOR = (255, 100, 0)     # blue-ish
-_ROI_COLOR = (0, 220, 255)      # yellow
-_PERSON_COLOR = (0, 200, 0)     # green
 
 
 def open_capture(args: argparse.Namespace):
@@ -58,7 +54,6 @@ def main() -> int:
         return 1
 
     face_registry = FaceRegistry(args.face_registry_dir)
-    roi_config = load_config(args.config)  # only used to redraw the ROI region for visualization
 
     frame_idx = 0
     try:
@@ -72,24 +67,17 @@ def main() -> int:
                 fx, fy, fw, fh = face.face_bbox
                 cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), _FACE_COLOR, 2)
 
-                if roi_config.roi_expansion_factor is not None:
-                    rx1, ry1, rx2, ry2 = compute_roi(
-                        face.face_bbox, frame.shape, roi_config.roi_expansion_factor,
-                        upward_fraction=roi_config.roi_upward_fraction, width_fraction=roi_config.roi_width_fraction,
-                    )
-                    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), _ROI_COLOR, 2)
-
                 person = evaluate_person(frame, face.face_bbox)
                 print(
                     f"frame={frame_idx:06d} matched_person_name={face.matched_person_name} "
                     f"person_found={person.person_found} person_bbox={person.person_bbox} "
                     f"detection_confidence={person.detection_confidence}"
                 )
+                person.draw_debug(frame, face.face_bbox)
                 if person.person_found:
-                    px, py, pw, ph = person.person_bbox
-                    cv2.rectangle(frame, (px, py), (px + pw, py + ph), _PERSON_COLOR, 2)
+                    px, py, _pw, _ph = person.person_bbox
                     cv2.putText(frame, f"{face.matched_person_name}", (px, max(15, py - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, _PERSON_COLOR, 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
 
             cv2.imshow("visualize_human_detection_roi", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
