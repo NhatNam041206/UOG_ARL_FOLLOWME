@@ -229,63 +229,14 @@ for the full tuning workflow.
 
 ---
 
-## `appearance_verifier`
+## `appearance_verifier` — REMOVED 2026-08-27
 
-**Pipeline position:** none currently — not part of either main pipeline's data flow. Was a shared
-dependency of the now-removed `target_tracking` (periodic re-verification during active tracking)
-and `target_recovery` (fallback re-acquisition path); `autocar` uses its own independent OSNet
-embedder instead of this module. Holds no per-caller state.
-
-**Purpose:** answers one question — "does this new person crop look like the same person as this
-earlier set of reference crops?" — an appearance-based identity check, distinct from and
-complementary to `face_identity`'s face-based check.
-
-**Working principle:**
-1. A **standalone** OSNet (`osnet_x1_0`) instance, via `torchreid`'s official `FeatureExtractor`
-   utility (its documented preprocessing exactly: resize to 256×128, ImageNet mean/std
-   normalization — not hand-rolled). Weights: the REAL Market1501-trained checkpoint (94.2%
-   rank-1, 82.6% mAP), auto-downloaded via `gdown` from its published Google Drive file id and
-   cached locally on first use — notably **not** what `torchreid`'s own `pretrained=True`
-   shortcut provides (that only fetches an ImageNet-classification backbone despite the name;
-   discovered and corrected during this module's implementation, see `embedder.py`'s docstring
-   for the full account).
-2. `embed(crop_bgr)`: BGR→RGB swap, `FeatureExtractor` forward pass, L2-normalize the output
-   (the extractor's own forward pass does not normalize it).
-3. `build_reference_set(person_crops)`: embeds every provided crop **once** and stores the
-   vectors — callers build this once per episode (e.g. a tracking module's RECORD phase) and
-   reuse it across many comparisons, never re-embedding reference crops per call.
-4. `verify(candidate_crop, reference_set)`: embeds the candidate once, compares against every
-   stored reference embedding via cosine similarity (both sides L2-normalized, so this reduces to
-   a plain dot product — same pattern as `face_identity`'s matching stage), returns the **best**
-   score found. `match_found = best_score >= similarity_threshold`.
-5. **"Not ready" floor:** an empty reference set (`reference_frame_count == 0`) reports
-   `match_found=False` without attempting a meaningless comparison — `best_similarity_score`
-   stays a real placeholder (`0.0`, never `None`/`NaN`) so the type stays a plain `float`;
-   callers must check `reference_frame_count`, not the score itself, to distinguish "not ready"
-   from a genuine non-match.
-
-**Public contract** (`AppearanceVerifierResult`): `match_found`, `best_similarity_score` (always
-a real number), `reference_frame_count`.
-
-**Key parameters:** `similarity_threshold` — required, fail-closed, and treated as **especially**
-uncalibrated (see Known Limitations below — a starting guess here is less trustworthy than usual
-elsewhere in this project). `osnet_model_name` — working default (`osnet_x1_0`), not
-calibration-gated. See [parameters.md](parameters.md#appearance_verifier).
-
-**Known limitations** (both apply to every caller, not just one — kept deliberately separate):
-1. **Similar-clothing confusion.** OSNet-based appearance matching struggles to distinguish
-   people wearing similar-colored/styled clothing, since appearance embeddings lean heavily on
-   clothing as a feature. Test explicitly for this during calibration — don't assume it away.
-2. **Cross-domain generalization drop.** Published OSNet benchmarks show accuracy can drop
-   sharply on footage meaningfully different from its training distribution (Market-1501-family
-   datasets). This project's own campus footage/lighting/camera are an untested domain relative
-   to that training data — a distinct risk from clothing confusion, not the same one.
-
-The now-removed `target_tracking`'s periodic re-verify and `target_recovery`'s Path B fallback
-each inherited both risks whole, using their own independently-tunable threshold key rather than
-this module's `similarity_threshold` — precisely so each could be tuned to its own risk tolerance
-(a false LOST during active tracking is a different cost than a false re-acquisition during
-search). No live caller uses this module currently.
+Was a shared dependency of the now-removed `target_tracking`/`target_recovery` (below); `autocar`
+uses its own independent OSNet embedder instead (see its section below), and no other caller ever
+adopted this module — deleted as dead code, never wired into either live pipeline's data flow.
+Full working-principle/known-limitations writeup is in git history (`git log -- docs/modules.md`)
+if ever needed. Its only dependencies, `torchreid` and `gdown`, were pulled from
+`requirements.txt` for the same reason (see `docs/technologies.md`).
 
 ---
 

@@ -191,13 +191,9 @@ meaningful.
 
 ## Standalone-only overlays (not reachable from `main.py`)
 
-### `appearance_verifier` (`visualize_appearance_verifier.py`)
-
-| Color | BGR | Meaning |
-|---|---|---|
-| 🟢 Green | `(0, 200, 0)` | `match_found = True`. |
-| 🔴 Red | `(0, 0, 255)` | `match_found = False` (compared, genuinely didn't match). |
-| ⚪ Gray | `(200, 200, 200)` | `reference_frame_count == 0` — "not ready," never attempted a real comparison. Distinguish this from red: gray means no comparison happened at all, red means one happened and failed. |
+`appearance_verifier`'s overlay (`visualize_appearance_verifier.py`) is gone along with the
+module (removed 2026-08-27, dead code) — see
+[`modules.md`](modules.md#appearance_verifier--removed-2026-08-27).
 
 `target_tracking`'s click-and-drag selection box (`visualize_target_tracking.py`) is gone along
 with the module — see [`parameters.md`](parameters.md#target_tracking--target_recovery-plans06-plans07--removed-2026-08-26).

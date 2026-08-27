@@ -59,9 +59,6 @@ modules/
   gesture_hand_keypoint/          The TRIGGER gesture method: MediaPipe hand-shape sequence
                                    classifier (two alternatives, wave_facing_gate and
                                    gesture_trajectory_verifier, were removed)
-  appearance_verifier/            OSNet Re-ID — no live caller currently (was a shared dependency
-                                   of target_tracking + target_recovery, both removed — see
-                                   Post-trigger flow below); kept as a runnable standalone tool
   autocar/                        Vendored tracking+recovery backbone (vinhh9608-byte/Autocar,
                                    commit 27ee33a) — YOLOv8-pose + ByteTrack + OSNet TargetLock,
                                    pulled in via `git clone` and kept COMPLETELY UNMODIFIED, not
@@ -230,9 +227,10 @@ The tracking+recovery engine originally spec'd in `plans/06`/`plans/07` (this pr
 `target_tracking`/`target_recovery`, dynamic on-the-fly reference capture, built on
 `appearance_verifier`'s OSNet-via-torchreid) has been **replaced** by a teammate's already-built
 tracking+recovery backbone (`vinhh9608-byte/Autocar`), vendored unmodified at `modules/autocar/`
-and driven by `modules/followme_orchestrator/autocar_adapter.py`. The old modules are still
-present (not yet deleted, pending final confirmation the replacement works end-to-end) but are no
-longer in the call path — `followme_orchestrator/pipeline.py` calls `autocar_adapter` exclusively.
+and driven by `modules/followme_orchestrator/autocar_adapter.py`. `target_tracking`/
+`target_recovery` were deleted 2026-08-26 once the replacement was confirmed working end-to-end;
+`appearance_verifier` (never in the call path itself — see `docs/modules.md`) was deleted
+2026-08-27 as dead code. `followme_orchestrator/pipeline.py` calls `autocar_adapter` exclusively.
 
 ```mermaid
 flowchart TD
@@ -425,7 +423,6 @@ colocated inside `modules/<module>/` since they aren't test files:
 | `face_identity` | `project_tests/face_identity/test_face_identity.py`, `modules/face_identity/visualize_face_identity.py` |
 | `human_detection_roi` | `project_tests/human_detection_roi/test_human_detection_roi.py`, `modules/human_detection_roi/visualize_human_detection_roi.py` |
 | `gesture_hand_keypoint` (the TRIGGER gesture method) | `project_tests/gesture_hand_keypoint/test_gesture_hand_keypoint.py`, `modules/gesture_hand_keypoint/visualize_gesture_hand_keypoint.py` |
-| `appearance_verifier` | `project_tests/appearance_verifier/test_appearance_verifier.py`, `modules/appearance_verifier/visualize_appearance_verifier.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
 | `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo (never moved — vendored, untouched), exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
 | `followme_orchestrator` | `project_tests/followme_orchestrator/test_followme_orchestrator.py`, `modules/followme_orchestrator/visualize_followme_orchestrator.py` — the latter is the only tool that exercises the ENTIRE pipeline end-to-end |
 | `mqtt_bridge` | `project_tests/mqtt_bridge/test_codec.py` — pure `codec.py` unit tests, no broker needed |

@@ -72,11 +72,9 @@ gesture_hand_keypoint:
   max_transition_gap_seconds: 1.5
   confirmation_duration_seconds: 1.0
 
-# OSNet Re-ID, plans/05 — shared dependency of target_tracking/target_recovery below (each has its
-# OWN separate threshold key, not this one) — see docs/parameters.md#appearance_verifier-plans05.
-appearance_verifier:
-  similarity_threshold: null
-  # osnet_model_name: "osnet_x1_0"
+# modules.appearance_verifier (plans/05) — REMOVED 2026-08-27, dead code never wired into any
+# live pipeline (torchreid/gdown, its only dependents, were pulled from requirements.txt for the
+# same reason — see docs/technologies.md).
 
 # modules.target_tracking/modules.target_recovery (plans/06, plans/07) — REMOVED 2026-08-26,
 # fully superseded by autocar below (see docs/parameters.md's autocar section for the one
