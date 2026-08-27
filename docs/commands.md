@@ -70,7 +70,7 @@ python main.py --mode camera --modules followme --show --mqtt
 | `--person-name` | `register` | Headless single-person registration, no UI. Omit to open the Tkinter UI. |
 | `--front-samples` / `--back-samples` | `register` | Sample counts per capture phase (default 15 each) |
 | `--then-followme` | `register --person-name` | On success, fall through into the same `followme` camera loop |
-| `--show` | always | Opens a display window. `register`'s capture window used to ignore this flag entirely and always show (a real gap — a true SSH session with no display would hang here); both `main.py --modules register --person-name` and `register_person.py`'s own standalone CLI now gate it the same as `pretrigger`/`followme`, off by default. |
+| `--show` | always | Opens a display window. `register`'s capture window used to ignore this flag entirely and always show (a real gap — a true SSH session with no display would hang here); both `main.py --modules register --person-name` and `scripts/register_person.py`'s own standalone CLI now gate it the same as `pretrigger`/`followme`, off by default. |
 | `--debug` | `pretrigger \| followme` | Full per-phase debug overlay — only visible combined with `--show` (or saved via `--save-video`/streamed via `--stream`, see below). `pretrigger`: face bbox + ROI + gesture keypoints/skeleton/state. `followme`: all of that PLUS `autocar_adapter`'s tracked bbox/center-line/state readout, via `modules.followme_orchestrator.draw_debug()`. |
 | `--save-video` | `pretrigger \| followme` | Saves the annotated debug overlay to `runs/<run_id>/debug.avi` (MJPG) — independent of `--show`, works headlessly over SSH. The overlay is drawn even without `--show` whenever this is set, so the saved video matches what `--debug`/`--show` would have displayed live. |
 | `--log-dir` | `pretrigger \| followme \| register --person-name` | Where per-run structured logs are written (default `runs`). Always on for these — see "Reviewing a run" below. |
@@ -115,16 +115,16 @@ whole folder down and inspect it locally instead of needing a monitor on the Pi:
 ```bash
 scp -r pi@<host>:~/UOG_AIS_FOLLOWME/runs/20260826T210455Z_followme .
 python -c "import json; print(json.load(open('20260826T210455Z_followme/meta.json'))['exit_reason'])"
-python tail_log.py --latest             # pretty-printed live tail, on the Pi itself — see below
+python scripts/tail_log.py --latest     # pretty-printed live tail, on the Pi itself — see below
 ```
 `runs/` is gitignored — these are per-run artifacts, not project source.
 
-### Watching a run live (`--stream`, `debug_stream.py`)
+### Watching a run live (`--stream`, `scripts/debug_stream.py`)
 
 `--save-video`/`decisions.jsonl` are for reviewing a run **afterward** — `--stream` is for
 watching one **live**, as an alternative to `--show` when no display is attached (the normal case
 over SSH). It's dev-tooling only, deliberately not wired into any module's core pipeline path —
-see [`debug_stream.py`](../debug_stream.py)'s own docstring. Binds `127.0.0.1` only, never exposed
+see [`debug_stream.py`](../scripts/debug_stream.py)'s own docstring. Binds `127.0.0.1` only, never exposed
 on the network — view it through an SSH local port-forward:
 
 ```bash
@@ -136,7 +136,7 @@ ssh -L 8080:localhost:8080 pi@<host>
 **Stopping a `--stream`-only run** (no `--show`, so there's no `q`-keypress window to click into):
 `Ctrl+C` in the terminal running `main.py` is the legitimate way to stop it — it exits cleanly
 (camera released, stream/logger closed, `meta.json` records `exit_reason="user_quit"`), not as a
-raw crash/traceback. For `register_person.py --interactive` specifically, `Ctrl+C` is
+raw crash/traceback. For `scripts/register_person.py --interactive` specifically, `Ctrl+C` is
 context-sensitive: pressed while a `register <name>` command is actively capturing, it cancels
 just that command and drops you back at the `>>>` prompt; pressed while idle at the prompt, it
 exits the whole console.
@@ -158,18 +158,18 @@ Note: --stream needs --person-name or --interactive under --modules register; op
 interactive console (pass --interactive explicitly to skip this note).
 ```
 
-### Registering people (`register_person.py` / `--modules register`)
+### Registering people (`scripts/register_person.py` / `--modules register`)
 
 ```bash
 # Tkinter CRUD app: register new people, or pick/re-capture/delete existing ones
-python register_person.py
+python -m scripts.register_person
 
 # Headless, one person, no UI — --show off by default here too now (see the --show row above);
 # add --show to open a local window
-python register_person.py Nam --camera-index 0 [--front-samples 15] [--back-samples 15]
+python -m scripts.register_person Nam --camera-index 0 [--front-samples 15] [--back-samples 15]
 
 # Same, but also/instead streamed over HTTP — see "Watching a run live" above
-python register_person.py Nam --stream
+python -m scripts.register_person Nam --stream
 ```
 
 ### Registration console (`--interactive`)
@@ -177,15 +177,15 @@ python register_person.py Nam --stream
 An interactive alternative to both of the above for a headless SSH session — list who's
 registered, register/re-register a person, or delete one, all from a plain text prompt, no
 display needed at all (plans/11_registration_interactive_console.md). Available both through
-`main.py` and through `register_person.py`'s own standalone CLI:
+`main.py` and through `scripts/register_person.py`'s own standalone CLI:
 
 ```bash
 python main.py --modules register --interactive
 python main.py --modules register --interactive --stream   # + watch the live capture overlay in a browser
 python main.py --modules register --interactive --log-dir /home/pi/register_runs
 
-python register_person.py --interactive              # equivalent, standalone form
-python register_person.py --interactive --stream
+python -m scripts.register_person --interactive              # equivalent, standalone form
+python -m scripts.register_person --interactive --stream
 ```
 `--interactive` is mutually exclusive with `--person-name` (both entry points reject the
 combination outright) and with `--then-followme` — `--then-followme` means "whoever was just
@@ -213,7 +213,7 @@ Registration console. Commands: list, register <name>, delete <name>, follow <na
 `follow <name>` requires the person to already be fully registered (both a face registry entry
 and a target profile — `list`'s `ready=` column shows this); on an unready name it prints why and
 stays in the console instead of exiting. Only reaches followme mode through `main.py` — through
-`register_person.py`'s own standalone CLI, `follow` still selects the name and reports it, but
+`scripts/register_person.py`'s own standalone CLI, `follow` still selects the name and reports it, but
 that script has no camera-loop machinery of its own to continue into, same limitation as the
 `--person-name` path's own `--then-followme` — it tells you to relaunch via `main.py` instead.
 
@@ -225,9 +225,9 @@ Logs the same way the headless form does — `runs/<timestamp>_register/decision
 never prints them to this terminal; watch them live from a SECOND terminal/SSH session instead:
 
 ```bash
-python tail_log.py --latest                       # auto-picks the run just started above
-python tail_log.py runs/20260827T120000Z_register/decisions.jsonl   # or point at one directly
-python tail_log.py --latest --lines 0               # skip history, only show new records
+python scripts/tail_log.py --latest                       # auto-picks the run just started above
+python scripts/tail_log.py runs/20260827T120000Z_register/decisions.jsonl   # or point at one directly
+python scripts/tail_log.py --latest --lines 0               # skip history, only show new records
 ```
 ```
 Tailing runs/20260827T120000Z_register/decisions.jsonl — Ctrl+C to stop.
@@ -271,13 +271,15 @@ python main.py --source 0 --target models/enrolled_Nam.npz --device cpu
 ## 2. Per-module standalone tools
 
 Every module has a `test_*.py` (prints results, minimal/no window) and, where the module's spec
-requires it, a `visualize_*.py` (draws a debug overlay). Run any of them with `-m` from the repo
-root.
+requires it, a `visualize_*.py` (draws a debug overlay). `test_*.py` files live under
+`project_tests/<module>/` (not `modules/<module>/` — see [`architecture.md`](architecture.md)'s
+"Test layout" note for why that directory isn't named `tests/`); `visualize_*.py` files stay
+inside `modules/<module>/`. Run any of them with `-m` from the repo root.
 
 ### `emergency_stop`
 
 ```bash
-python -m modules.emergency_stop.test_estop path/to/video.mp4 --show
+python -m project_tests.emergency_stop.test_estop path/to/video.mp4 --show
 ```
 No `--mode camera` option — video file only. All 10 thresholds are `null` by default (see
 [`parameters.md`](parameters.md#emergency_stop)), so this reports `UNCERTAIN` on every frame
@@ -286,14 +288,14 @@ until calibrated.
 ### `human_detection` (legacy whole-frame detector)
 
 ```bash
-python -m modules.human_detection.test_human_detection path/to/video.mp4 --show
+python -m project_tests.human_detection.test_human_detection path/to/video.mp4 --show
 ```
 
 ### `face_identity`
 
 ```bash
 # Test matching against the registry, from a video
-python -m modules.face_identity.test_face_identity path/to/video.mp4 --registry-dir modules/face_identity/registry_data
+python -m project_tests.face_identity.test_face_identity path/to/video.mp4 --registry-dir modules/face_identity/registry_data
 
 # Live visualization (bbox + match status overlay)
 python -m modules.face_identity.visualize_face_identity --mode camera [--camera-index 0]
@@ -316,7 +318,7 @@ python -m modules.face_identity.build_face_registry <person_name> --images-dir p
 
 ```bash
 # Test with a manually-supplied fixed face bbox (no face detector in this test)
-python -m modules.human_detection_roi.test_human_detection_roi path/to/video.mp4 --face-bbox X Y W H
+python -m project_tests.human_detection_roi.test_human_detection_roi path/to/video.mp4 --face-bbox X Y W H
 
 # Live visualization, chained with face_identity (face bbox in blue, ROI in yellow, person bbox in green)
 python -m modules.human_detection_roi.visualize_human_detection_roi --mode camera [--camera-index 0]
@@ -330,7 +332,7 @@ Two other gesture methods — `wave_facing_gate` ("condition") and `gesture_traj
 (confirmed with the user — hand_keypoint is the only TRIGGER gesture method now).
 
 ```bash
-python -m modules.gesture_hand_keypoint.test_gesture_hand_keypoint path/to/video.mp4
+python -m project_tests.gesture_hand_keypoint.test_gesture_hand_keypoint path/to/video.mp4
 
 # Live visualization, chained with face_identity + human_detection_roi. Shows the hand skeleton
 # colored yellow=OPEN/green=CLOSED/gray=NEITHER, per-finger extended/curled coloring, the red
@@ -343,7 +345,7 @@ python -m modules.gesture_hand_keypoint.visualize_gesture_hand_keypoint --mode v
 
 ```bash
 # Test: compare every frame of a video against a folder of reference images
-python -m modules.appearance_verifier.test_appearance_verifier path/to/video.mp4 --reference-dir path/to/reference_images/
+python -m project_tests.appearance_verifier.test_appearance_verifier path/to/video.mp4 --reference-dir path/to/reference_images/
 
 # Visualization: camera/video (continuous) or a single image
 python -m modules.appearance_verifier.visualize_appearance_verifier --reference-dir path/to/reference_images/ --mode camera [--camera-index 0]
@@ -363,7 +365,7 @@ replacement in `autocar`.
 ### `followme_orchestrator` (the FULL pipeline, all 8 plans composed together)
 
 ```bash
-python -m modules.followme_orchestrator.test_followme_orchestrator path/to/video.mp4
+python -m project_tests.followme_orchestrator.test_followme_orchestrator path/to/video.mp4
 
 # Live visualization: face-center line, tracked/reacquired bbox, debug_state, should_move, steering angle
 python -m modules.followme_orchestrator.visualize_followme_orchestrator --mode camera [--camera-index 0]
@@ -374,11 +376,19 @@ until `camera.fov_degrees` and the `steering` section's `kp`/`ki`/`kd`/`max_stee
 are calibrated (see [`parameters.md`](parameters.md#steering-plans08)) — trigger detection,
 tracking, and recovery all work regardless of steering calibration state.
 
+### `mqtt_bridge` (`--mqtt` only)
+
+Pure-logic unit tests for the wire-encoding boundary (`codec.py`) — no broker or network needed:
+```bash
+python -m pytest project_tests/mqtt_bridge/test_codec.py -v
+```
+For an actual end-to-end MQTT check, see [`mqtt_handoff_pi4.md`](mqtt_handoff_pi4.md).
+
 ---
 
 ## 3. Recommended order for a first end-to-end smoke test
 
-1. `register_person.py` (or `main.py`, default) — register yourself: FRONT + BACK capture,
+1. `scripts/register_person.py` (or `main.py`, default) — register yourself: FRONT + BACK capture,
    builds both the face registry entry and the `modules/autocar` re-id profile in one session.
 2. `visualize_face_identity` — confirm you're matched live.
 3. `visualize_human_detection_roi` — confirm your body bbox tracks correctly off your face.

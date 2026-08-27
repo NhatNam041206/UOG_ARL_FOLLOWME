@@ -5,7 +5,7 @@ chunk 8, extended with the 'follow <name>' command). Drives it with a scripted s
 get_status()/delete_person() and register_person.run() itself so no real camera/model is ever
 touched. Run with:
 
-    python -m pytest test_register_person_interactive.py -v
+    python -m pytest project_tests/test_register_person_interactive.py -v
 """
 import json
 import os
@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 import pytest
 
-import register_person
-import registration_data as data
-from run_logging import RunLogger
+from scripts import register_person
+from scripts import registration_data as data
+from scripts.run_logging import RunLogger
 
 
 def _person(name, front=15, back=15, ready=True):

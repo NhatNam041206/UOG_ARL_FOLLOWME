@@ -1,10 +1,10 @@
 """
 Standalone test entry point for the face_identity module. Imports ONLY from
 modules.face_identity.interface — no other project module is imported or required, so this can
-run in isolation to validate the module on its own (mirrors modules/emergency_stop/test_estop.py).
+run in isolation to validate the module on its own (mirrors project_tests/emergency_stop/test_estop.py).
 
 Usage:
-    python -m modules.face_identity.test_face_identity <path-to-video-file>
+    python -m project_tests.face_identity.test_face_identity <path-to-video-file>
 """
 import argparse
 import sys

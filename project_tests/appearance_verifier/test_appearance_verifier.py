@@ -1,13 +1,13 @@
 """
 Standalone test entry point for the appearance_verifier module. Imports ONLY from
 modules.appearance_verifier.interface — no other project module is imported or required
-(mirrors modules/face_identity/test_face_identity.py).
+(mirrors project_tests/face_identity/test_face_identity.py).
 
 Compares every frame of a video against a small set of reference images to sanity-check
 embedding + matching end to end, without needing a live person detector.
 
 Usage:
-    python -m modules.appearance_verifier.test_appearance_verifier <video_path> --reference-dir <folder-of-reference-images>
+    python -m project_tests.appearance_verifier.test_appearance_verifier <video_path> --reference-dir <folder-of-reference-images>
 """
 import argparse
 import glob

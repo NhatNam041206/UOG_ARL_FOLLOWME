@@ -46,8 +46,8 @@ from typing import List
 import cv2
 import numpy as np
 
-import registration_overlay as overlay
 from modules.followme_orchestrator import autocar_bootstrap
+from scripts import registration_overlay as overlay
 
 CAPTURES_DIR = "registration_captures"
 FACE_REGISTRY_DIR = "modules/face_identity/registry_data"

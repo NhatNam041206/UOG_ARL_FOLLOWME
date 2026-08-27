@@ -6,7 +6,7 @@ is imported or required, so this can run in isolation. A face bbox must be suppl
 modules.face_identity, but this test validates ROI-scoping/person-detection in isolation from it.
 
 Usage:
-    python -m modules.human_detection_roi.test_human_detection_roi <path-to-video-file> --face-bbox X Y W H
+    python -m project_tests.human_detection_roi.test_human_detection_roi <path-to-video-file> --face-bbox X Y W H
 """
 import argparse
 import sys

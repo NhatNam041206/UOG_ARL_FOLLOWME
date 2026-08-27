@@ -37,7 +37,7 @@ any is `null`, `EmergencyStopModule` outputs `UNCERTAIN` (STOP-equivalent) on ev
 | `t_mid_seconds` | 🔴 | How long an object must continuously dwell in the mid zone before it triggers STOP (near-zone objects trigger immediately, no dwell). | Balance false-stop annoyance (too short) against reaction time lost (too long). |
 | `min_detection_confidence` | 🔴 | YOLO detection confidence floor. A detection below this escalates the **whole frame** to `UNCERTAIN` rather than being silently dropped (a dropped low-confidence detection could be a real obstacle). | Set from your detector's real precision/recall curve on representative footage, not a generic YOLO default — this gates a safety-critical path. |
 | `resume_buffer_seconds` | 🔴 | Seconds of uninterrupted "runway clear" required before `STOP`→`GO` (any interruption resets the timer to zero, no partial credit). Spec suggests ~2–3s as a starting point. | Longer = safer but more sluggish resume; shorter = faster resume but more sensitive to detection flicker. |
-| `yolo_model_path` | 🟢 | This module's own standalone YOLO weights file. Deliberately never shared with any other module's detector instance (safety isolation). | Default `yolo11n.onnx` at repo root; override only to use a different model. |
+| `yolo_model_path` | 🟢 | This module's own standalone YOLO weights file. Deliberately never shared with any other module's detector instance (safety isolation). | Default `models/yolo11n.onnx`; override only to use a different model. |
 
 **Not yet a config key at all** (deliberately): a latency budget. Spec requires frame-time
 (capture+inference+decision) to be benchmarked on target hardware before this can be set
@@ -56,7 +56,7 @@ kept as a runnable standalone tool.
 | Parameter | Current | Status | Meaning | Tuning notes |
 |---|---|---|---|---|
 | `confidence_threshold` | 0.5 | 🟡 working value | YOLO detection confidence floor, person class only. | Standard YOLO default; raise to cut false detections in clutter, lower if distant/partial people are missed. |
-| `yolo_model_path` | 🟢 | Same `yolo11n.onnx` file as every other YOLO-based module, but always its own fresh instance. | Override only for a different model. |
+| `yolo_model_path` | 🟢 | Same `models/yolo11n.onnx` file as every other YOLO-based module, but always its own fresh instance. | Override only for a different model. |
 
 ---
 
@@ -274,7 +274,7 @@ engine/profile or the adapter's own logic. For the full composed pipeline, use
 
 ---
 
-## `register_person` (`register_person.py` — not a per-frame pipeline module)
+## `register_person` (`scripts/register_person.py` — not a per-frame pipeline module)
 
 The ROI a detection must fall inside during capture to count as a sample — see
 `registration_overlay.crop_to_roi()`. Exists so that if someone else walks through the background
@@ -291,8 +291,8 @@ framing.
 | `front_roi_percent` | `[0.20, 0.05, 0.80, 0.95]` | 🟡 | `[x1,y1,x2,y2]`, frame-fraction box checked against the detected FACE bbox during FRONT capture (in the earlier ROI-gated design) / used to crop the saved RAW frame (current design — see `docs/architecture.md`'s Registration UI section). | Widen/narrow to match how far back the subject stands from the camera during registration. |
 | `back_roi_percent` | `[0.15, 0.0, 0.85, 1.0]` | 🟡 | Same, for BACK capture — wider by default since a turned-around body silhouette varies more than a face. | Same tuning approach as `front_roi_percent`. |
 
-**How to tune:** run `python register_person.py` (Tkinter UI) or `python register_person.py
-<name>` (headless) and watch the drawn ROI box live — the Tkinter flow's post-crop pause
+**How to tune:** run `python -m scripts.register_person` (Tkinter UI) or `python -m
+scripts.register_person <name>` (headless) and watch the drawn ROI box live — the Tkinter flow's post-crop pause
 (`CaptureWindow`'s OK/Cancel dialog) is the actual point to check whether the box was sized
 correctly, by opening `registration_captures/<name>/cropped/` and looking at the results.
 

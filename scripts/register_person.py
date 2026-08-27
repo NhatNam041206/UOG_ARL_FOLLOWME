@@ -19,7 +19,7 @@ CRUD, from the Tkinter app (run with no arguments):
                  files. Requires confirming a dialog.
 
 Also runnable non-interactively for one person, skipping the GUI entirely:
-    python register_person.py <person_name> [--camera-index 0] [--front-samples 15] [--back-samples 15]
+    python -m scripts.register_person <person_name> [--camera-index 0] [--front-samples 15] [--back-samples 15]
     python main.py --modules register --person-name <person_name> [--camera-index 0]
 Both call run() below directly — same flow either way, still built on Layer 1/2, just a plain
 cv2 window instead of the Tkinter app (used by main.py's --then-followme chain, where a second
@@ -71,11 +71,11 @@ import cv2
 import yaml
 from PIL import Image, ImageTk
 
-import registration_data as data
-import registration_overlay as overlay
-from debug_stream import DebugStreamServer
 from modules.face_identity.registry import sanitize_person_name
-from run_logging import RunLogger
+from scripts import registration_data as data
+from scripts import registration_overlay as overlay
+from scripts.debug_stream import DebugStreamServer
+from scripts.run_logging import RunLogger
 
 _CAPTURE_INTERVAL_SECONDS = 1.0  # gap between accepted samples, so they're not near-duplicate frames
 _COUNTDOWN_SECONDS = 3.0

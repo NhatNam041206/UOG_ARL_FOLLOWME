@@ -1,10 +1,10 @@
 """
 Standalone test entry point for the followme_orchestrator module. Imports ONLY from
-modules.followme_orchestrator.interface (mirrors modules/face_identity/test_face_identity.py) —
+modules.followme_orchestrator.interface (mirrors project_tests/face_identity/test_face_identity.py) —
 runs the full composed pipeline against a video, printing FollowMeCommand per frame.
 
 Usage:
-    python -m modules.followme_orchestrator.test_followme_orchestrator <video_path>
+    python -m project_tests.followme_orchestrator.test_followme_orchestrator <video_path>
 """
 import argparse
 import sys

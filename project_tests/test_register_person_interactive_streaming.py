@@ -6,11 +6,11 @@ LiveSubjectDetector are faked out — everything else, including the real DebugS
 unmodified) and checks the stream's buffer actually received a frame.
 
 Also verifies the REPL's own terminal output stays free of raw decisions.jsonl content — logs go
-only to the file, never printed to stdout, so a second terminal running tail_log.py (chunk 9) is
-genuinely the only way to watch them, not a redundant option.
+only to the file, never printed to stdout, so a second terminal running scripts/tail_log.py
+(chunk 9) is genuinely the only way to watch them, not a redundant option.
 
 Run with:
-    python -m pytest test_register_person_interactive_streaming.py -v
+    python -m pytest project_tests/test_register_person_interactive_streaming.py -v
 """
 import json
 import os
@@ -19,10 +19,10 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-import register_person
-import registration_data as data
-from debug_stream import DebugStreamServer
-from run_logging import RunLogger
+from scripts import register_person
+from scripts import registration_data as data
+from scripts.debug_stream import DebugStreamServer
+from scripts.run_logging import RunLogger
 
 
 class _FakeCap:

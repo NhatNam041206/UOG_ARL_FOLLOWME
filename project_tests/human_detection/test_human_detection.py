@@ -2,10 +2,10 @@
 Standalone test entry point for the human_detection module. Imports ONLY from
 modules.human_detection.interface — no other project module is imported or required, so this
 can run in isolation to validate the module on its own (mirrors
-modules/emergency_stop/test_estop.py).
+project_tests/emergency_stop/test_estop.py).
 
 Usage:
-    python -m modules.human_detection.test_human_detection <path-to-video-file> [--show]
+    python -m project_tests.human_detection.test_human_detection <path-to-video-file> [--show]
 """
 import argparse
 import sys

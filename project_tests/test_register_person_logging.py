@@ -9,7 +9,7 @@ All capture-phase timing constants are monkeypatched to 0 so every read is immed
 save (deterministic frame-count-driven test, not wall-clock-driven) — see each test's own comment.
 
 Run with:
-    python -m pytest test_register_person_logging.py -v
+    python -m pytest project_tests/test_register_person_logging.py -v
 """
 import json
 import os
@@ -17,9 +17,9 @@ import os
 import numpy as np
 import pytest
 
-import register_person
-import registration_data as data
-from run_logging import RunLogger
+from scripts import register_person
+from scripts import registration_data as data
+from scripts.run_logging import RunLogger
 
 
 class _FakeCap:

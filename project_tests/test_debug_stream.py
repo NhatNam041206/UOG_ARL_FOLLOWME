@@ -1,8 +1,8 @@
 """
-Unit tests for debug_stream.DebugStreamServer — real HTTP requests against a real server bound to
-an OS-assigned port (port=0), no camera/model dependency (cv2 itself has none). Run with:
+Unit tests for scripts.debug_stream.DebugStreamServer — real HTTP requests against a real server
+bound to an OS-assigned port (port=0), no camera/model dependency (cv2 itself has none). Run with:
 
-    python -m pytest test_debug_stream.py -v
+    python -m pytest project_tests/test_debug_stream.py -v
 """
 import time
 import urllib.error
@@ -11,7 +11,7 @@ import urllib.request
 import numpy as np
 import pytest
 
-from debug_stream import DebugStreamServer
+from scripts.debug_stream import DebugStreamServer
 
 
 @pytest.fixture

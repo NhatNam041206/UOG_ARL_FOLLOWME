@@ -1,12 +1,12 @@
 """
 Standalone test entry point for the gesture_hand_keypoint module. Imports ONLY from
 modules.gesture_hand_keypoint.interface — no other project module is imported or required, so
-this can run in isolation (mirrors modules/emergency_stop/test_estop.py). Treats the whole frame
+this can run in isolation (mirrors project_tests/emergency_stop/test_estop.py). Treats the whole frame
 as a single track_id=1 person crop, same documented simplification as
 modules/wave_facing_gate/test_wave_facing.py — point the camera/video at one person.
 
 Usage:
-    python -m modules.gesture_hand_keypoint.test_gesture_hand_keypoint <path-to-video-file>
+    python -m project_tests.gesture_hand_keypoint.test_gesture_hand_keypoint <path-to-video-file>
 """
 import sys
 import time

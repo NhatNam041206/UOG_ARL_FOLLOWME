@@ -35,18 +35,25 @@ two alternatives (`modules.wave_facing_gate`, `modules.gesture_trajectory_verifi
 ## Repository layout
 
 ```
-main.py                          Entry point — the only file that imports across modules
-register_person.py               A second composition root (see below) — the registration UI
-registration_data.py             Layer 1 of register_person: filesystem state, CRUD, building
-                                  both registry files
-registration_overlay.py          Layer 2 of register_person: pure frame-in/image-out drawing
+main.py                          Entry point — the ONLY loose Python file at the repo root; every
+                                  other .py file lives under scripts/, modules/, or project_tests/
 config/thresholds.yaml           All tunable parameters, one section per module
+models/                          Loose, non-vendored weight files project-owned modules point at
+                                  via thresholds.yaml (currently yolo11n.onnx) — see "A note on
+                                  model file locations" below for why not every .onnx/.pt in this
+                                  repo lives here
+scripts/                         Everything main.py imports or launches that isn't a per-frame CV
+                                  module — composition-root supporting code AND standalone CLI
+                                  tools alike, all in one place (see "scripts/ contents" below)
+project_tests/                   pytest suites + each module's own standalone test/visualization
+                                  CLI tool, moved out of modules/ — see "Test layout" below for
+                                  why this directory isn't named tests/ or test/
 docs/                            This documentation set
 plans/                           Original per-module design specs (01-04)
 modules/
   emergency_stop/                Collision-avoidance safety layer (runway + 3-zone STOP logic)
   human_detection/                Whole-frame person detector + ByteTrack (also used standalone by
-                                   register_person.py to gate the BACK capture phase)
+                                   scripts/register_person.py to gate the BACK capture phase)
   face_identity/                  Face detect + match against a registered-person database
   human_detection_roi/            ROI-scoped body detector, triggered by a matched face
   gesture_hand_keypoint/          The TRIGGER gesture method: MediaPipe hand-shape sequence
@@ -72,6 +79,51 @@ directory (`pipeline.py`, `config.py`, detector/estimator wrappers, etc.) is a p
 implementation detail and may change without notice. This is enforced by convention (each
 `interface.py` says so in its docstring), not by Python tooling.
 
+**`scripts/` contents.** One folder for everything that isn't `main.py` itself or a per-frame CV
+module, regardless of whether it's imported or run directly — deliberately not split into
+separate "shared infra" vs. "standalone tool" folders:
+- `register_person.py` — a **second composition root**, same standing as `main.py` (see "Design
+  rules" below and "Registration UI"). Runnable directly via `python -m scripts.register_person
+  <name>` (needs repo root as cwd for its own `modules.face_identity...`-style absolute imports
+  to resolve — see "Test layout" below for the same `-m`-from-repo-root reasoning applied to
+  `project_tests/`), or driven through `main.py --modules register`.
+- `registration_data.py` / `registration_overlay.py` — Layers 1/2 of `register_person.py`'s own
+  three-layer design (see "Registration UI" below); imported only by `register_person.py`.
+- `run_logging.py` / `debug_stream.py` — cross-cutting observability infra, imported by BOTH
+  `main.py` and `register_person.py` (see "Observability infrastructure" below).
+- `tail_log.py` — the one file here that's never imported by anything else in this project, only
+  ever run directly (`python scripts/tail_log.py --latest` or similar — no `-m` needed since it
+  has no internal repo-relative imports of its own).
+
+**A note on model file locations.** Only `yolo11n.onnx` was moved into `models/` — not every
+`.onnx`/`.pt` in this repo. Two things block moving the rest:
+- **`modules/autocar/` is vendored and must stay byte-for-byte unmodified** (design rule #2
+  below) — its own `config.py` hardcodes `POSE_MODEL_PATH = "yolov8n-pose.pt"` as a bare,
+  process-cwd-relative filename (not resolved relative to that file's own location), with no
+  override mechanism this project's `thresholds.yaml` reaches. Since `main.py` always runs from
+  the repo root, `yolov8n-pose.pt` must stay discoverable at `<repo root>/yolov8n-pose.pt` —
+  moving it would silently break `--modules followme` (which drives this file via
+  `autocar_adapter.py`) without touching a single line of vendored code to show why.
+- **`modules/autocar/models/*` and `modules/face_identity/models/*` are already correctly
+  module-scoped** (the former also vendored-adjacent — referenced via paths like
+  `"models/face_detection_yunet_2023mar.onnx"` relative to wherever `modules/autocar/` is used as
+  cwd, per its own standalone-script convention noted under "Debug/visualization architecture"
+  below) — moving either would require touching vendored code (the former) or gain nothing (the
+  latter is not "loose," it's already namespaced under its owning module).
+
+`yolo11n.onnx`, by contrast, was a genuinely loose root-level file used only by three
+NON-vendored modules (`emergency_stop`, `human_detection`, `human_detection_roi`), each already
+supporting a `yolo_model_path` override key in `thresholds.yaml` — moving it to `models/` was a
+config-only change, no code edited.
+
+**Test layout.** `project_tests/` mirrors `modules/`'s subfolder names for each module's own
+`test_*.py`, plus a flat top level for the repo-root pytest suites (`test_run_logging.py`, etc.).
+It is deliberately NOT named `tests/` or `test/` — both collide with real packages already
+installed in this project's own virtualenv (`ultralytics` ships an installed top-level `tests`
+package; CPython's stdlib ships `test`), which would silently shadow this project's own directory
+for any `python -m tests.<module>.test_<name>`-style invocation. Confirmed by direct
+`importlib.util.find_spec()` check against this project's `.venv`, not assumed.
+
 ## Design rules (apply across every module)
 
 These are conventions established and repeatedly confirmed over the course of building this
@@ -87,7 +139,7 @@ gated. See [`docs/parameters.md`](parameters.md) for the full status of every ke
 
 **2. Own-instance isolation, and only `main.py` composes across module boundaries.** No module
 shares a live model, detector, or tracker instance with another module, even when two modules
-use the identical underlying weights file (e.g. `yolo11n.onnx` is loaded independently by
+use the identical underlying weights file (e.g. `models/yolo11n.onnx` is loaded independently by
 `emergency_stop`, `human_detection`, and `human_detection_roi` — three separate `YOLO(...)`
 objects, three separate ByteTrack states). This is a safety/correctness isolation rule, not an
 oversight: it means one module's internal state (tracker IDs, confirmation debounce, motion
@@ -101,7 +153,7 @@ It still never reaches into any composed module's *private* implementation — o
 `interface.py` contracts, exactly as `main.py` already does. This is a composition-root
 exception, not a loophole other modules should also start taking.
 
-`register_person.py` (repo root, alongside `main.py`) is a **second** composition root, for the
+`scripts/register_person.py` is a **second** composition root, for the
 same reason `main.py` is one: it composes across `face_identity` and `modules/autocar`'s vendored
 code to build both registry files from one capture session — see "Registration UI" below.
 `modules/followme_orchestrator/autocar_adapter.py` bridges into `modules/autocar/`'s vendored
@@ -244,7 +296,7 @@ depends on (not part of the vendored repo — exported once via `torchreid`, see
 See [`docs/modules.md`](modules.md) for each module's full working principle and
 [`docs/parameters.md`](parameters.md) for their calibration status.
 
-### Registration UI (`register_person.py` — a second composition root)
+### Registration UI (`scripts/register_person.py` — a second composition root)
 
 Builds the two files `autocar_adapter`/`face_identity` need for a given person, from one capture
 session, via three layers (data / overlay / interact — the same separation of concerns as any
@@ -252,9 +304,9 @@ MVC-style design, applied here for the first time in this project):
 
 ```mermaid
 flowchart LR
-    L1["registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL identity detection happens here"]
-    L2["registration_overlay.py\nLayer 2 — pure frame-in/image-out\ndrawing + the ROI crop, zero I/O"]
-    L3["register_person.py\nLayer 3 — the ONLY file that reads\na camera, opens a window, or reads input"]
+    L1["scripts/registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL identity detection happens here"]
+    L2["scripts/registration_overlay.py\nLayer 2 — pure frame-in/image-out\ndrawing + the ROI crop, zero I/O"]
+    L3["scripts/register_person.py\nLayer 3 — the ONLY file that reads\na camera, opens a window, or reads input"]
     L3 -->|calls| L1
     L3 -->|calls| L2
 ```
@@ -283,12 +335,13 @@ embeddings); BACK feeds only the re-id profile's back-of-head embedding. A fresh
 and Update never mix old and new photos — but the already-built `.npz` files are only overwritten
 once a rebuild actually succeeds, so a failed session never destroys the last known-good profile.
 
-`register_person.py RegistrationApp` (Tkinter — no args) is the primary CRUD interface: New /
-Re-capture / Delete / Refresh, plus a "Follow Me" button that hands a fully-registered person's
-name back to `main.py` (via `RegistrationApp.chosen_name`) to fall through directly into the same
-`followme` camera loop `--then-followme` uses. `register_person.run()` is the same flow headless
-(plain cv2 window, no Tkinter) for scripted/one-person use — both `main.py --modules register
---person-name <name>` and standalone `python register_person.py <name>` call it directly.
+`scripts/register_person.py RegistrationApp` (Tkinter — no args) is the primary CRUD interface:
+New / Re-capture / Delete / Refresh, plus a "Follow Me" button that hands a fully-registered
+person's name back to `main.py` (via `RegistrationApp.chosen_name`) to fall through directly into
+the same `followme` camera loop `--then-followme` uses. `register_person.run()` is the same flow
+headless (plain cv2 window, no Tkinter) for scripted/one-person use — both `main.py --modules
+register --person-name <name>` and standalone `python -m scripts.register_person <name>` call it
+directly.
 
 ## Entry point (`main.py`)
 
@@ -361,18 +414,21 @@ onto:
    `draw_steering_arrow()` (`followme`), drawn *after* the module overlay so it isn't occluded.
 
 Every module additionally ships its own standalone CLI test/visualization script for isolated
-debugging without the rest of the pipeline:
+debugging without the rest of the pipeline. `test_*.py` files live in `project_tests/<module>/`
+(moved out of `modules/<module>/` — see "Test layout" above); `visualize_*.py` files stay
+colocated inside `modules/<module>/` since they aren't test files:
 
 | Module | Script |
 |---|---|
-| `emergency_stop` | `modules/emergency_stop/test_estop.py` |
-| `human_detection` | `modules/human_detection/test_human_detection.py` |
-| `face_identity` | `modules/face_identity/{test_face_identity,visualize_face_identity}.py` |
-| `human_detection_roi` | `modules/human_detection_roi/{test_human_detection_roi,visualize_human_detection_roi}.py` |
-| `gesture_hand_keypoint` (the TRIGGER gesture method) | `modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,visualize_gesture_hand_keypoint}.py` |
-| `appearance_verifier` | `modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
-| `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo, exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
-| `followme_orchestrator` | `modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py` — the only tool that exercises the ENTIRE pipeline end-to-end |
+| `emergency_stop` | `project_tests/emergency_stop/test_estop.py` |
+| `human_detection` | `project_tests/human_detection/test_human_detection.py` |
+| `face_identity` | `project_tests/face_identity/test_face_identity.py`, `modules/face_identity/visualize_face_identity.py` |
+| `human_detection_roi` | `project_tests/human_detection_roi/test_human_detection_roi.py`, `modules/human_detection_roi/visualize_human_detection_roi.py` |
+| `gesture_hand_keypoint` (the TRIGGER gesture method) | `project_tests/gesture_hand_keypoint/test_gesture_hand_keypoint.py`, `modules/gesture_hand_keypoint/visualize_gesture_hand_keypoint.py` |
+| `appearance_verifier` | `project_tests/appearance_verifier/test_appearance_verifier.py`, `modules/appearance_verifier/visualize_appearance_verifier.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
+| `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo (never moved — vendored, untouched), exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
+| `followme_orchestrator` | `project_tests/followme_orchestrator/test_followme_orchestrator.py`, `modules/followme_orchestrator/visualize_followme_orchestrator.py` — the latter is the only tool that exercises the ENTIRE pipeline end-to-end |
+| `mqtt_bridge` | `project_tests/mqtt_bridge/test_codec.py` — pure `codec.py` unit tests, no broker needed |
 
 `face_identity` also ships a two-phase registration flow, separate from testing:
 `capture_face_images.py` (Phase 1 — save padded face crops to `raw_captures/<person>/`) then
@@ -615,7 +671,7 @@ classDiagram
         +_on_follow_me()
     }
     class register_person_module {
-        <<module: register_person.py>>
+        <<module: scripts/register_person.py>>
         +run(person_name, camera_index, ..., show, stream, logger) int
         +run_interactive(camera_index, ..., stream, logger) (int, chosen_name)
     }
@@ -634,10 +690,12 @@ choice back to `main.py` to fall through into the shared followme camera loop (`
 return value here; `self.chosen_name` instance attribute there, since `mainloop()` returns
 nothing usable).
 
-### 5. Observability infrastructure (`run_logging.py`, `debug_stream.py`, `tail_log.py`)
+### 5. Observability infrastructure (`scripts/run_logging.py`, `scripts/debug_stream.py`, `scripts/tail_log.py`)
 
 Cross-cutting — not tied to any one pipeline, used by `main.py`'s pretrigger/followme loops and
-by `register_person.py`'s headless/interactive paths alike. See
+by `scripts/register_person.py`'s headless/interactive paths alike. All three live in `scripts/`
+alongside `register_person.py` and its own two layers — see "`scripts/` contents" above for why
+this project doesn't split "shared infra" from "standalone tool" into separate folders. See
 [`plans/10_debug_logging_observability.md`](../plans/10_debug_logging_observability.md) and
 [`plans/11_registration_interactive_console.md`](../plans/11_registration_interactive_console.md).
 
@@ -664,7 +722,7 @@ classDiagram
         +get_jpeg() bytes
     }
     class tail_log_module {
-        <<module: tail_log.py>>
+        <<module: scripts/tail_log.py>>
         +format_record(record) str
         +find_latest_run(log_root) str
         +tail_file(path, initial_lines) int

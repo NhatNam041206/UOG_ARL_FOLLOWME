@@ -4,7 +4,7 @@ onnxruntime needed (unlike main.py's actual per-frame pipelines, which this dev 
 import — see plans/10_debug_logging_observability.md chunk 5's verification note).
 
 Run with:
-    python -m pytest test_main_video_writer.py -v
+    python -m pytest project_tests/test_main_video_writer.py -v
 """
 import os
 

@@ -4,14 +4,14 @@ interactive_console.md chunk 10, extended with the 'follow <name>' / auto-select
 fixes) — monkeypatches sys.argv and register_person.run_interactive so no real camera/model is
 ever touched. Run with:
 
-    python -m pytest test_main_register_interactive.py -v
+    python -m pytest project_tests/test_main_register_interactive.py -v
 """
 import sys
 
 import pytest
 
 import main
-import register_person
+from scripts import register_person
 
 
 def _run_main(argv, monkeypatch):

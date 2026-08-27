@@ -5,7 +5,7 @@ deliberately avoid importing anything from this package's real pipeline.py, whic
 — see debug_snapshot.py's own docstring). Uses plain duck-typed fakes for the four result types.
 
 Run with:
-    python -m pytest modules/followme_orchestrator/test_debug_snapshot.py -v
+    python -m pytest project_tests/followme_orchestrator/test_debug_snapshot.py -v
 """
 from dataclasses import dataclass
 from typing import Optional

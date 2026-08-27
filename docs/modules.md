@@ -369,7 +369,7 @@ carried over as their own considered starting points (not blind guesses), plus
 
 **Requires a pre-enrolled profile** (`modules/autocar/models/enrolled_<name>.npz`) per followable
 person — unlike the old `target_tracking`, there is no on-the-fly reference capture. See
-`register_person.py` / [architecture.md](architecture.md#registration-ui-register_personpy--a-second-composition-root).
+`scripts/register_person.py` / [architecture.md](architecture.md#registration-ui-scriptsregister_personpy--a-second-composition-root).
 Also requires `modules/autocar/models/osnet_x1_0_msmt17.onnx` to exist — see
 [technologies.md](technologies.md) for how it's obtained.
 

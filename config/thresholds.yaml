@@ -5,7 +5,7 @@
 # Sole collision-avoidance layer (modules/emergency_stop) — all keys required; see
 # docs/parameters.md#emergency_stop.
 emergency_stop:
-  # yolo_model_path: "yolo11n.onnx"
+  yolo_model_path: "models/yolo11n.onnx"
 
   runway_left_line: null
   runway_right_line: null
@@ -41,7 +41,7 @@ steering:
 # Standalone detector used internally by target_tracking/target_recovery — see
 # docs/parameters.md#human_detection.
 human_detection:
-  # yolo_model_path: "yolo11n.onnx"
+  yolo_model_path: "models/yolo11n.onnx"
   confidence_threshold: 0.5
 
 # Face detect + match, plans/01 — see docs/parameters.md#face_identity-plans01--first-stage-of-the-face-first-pipeline.
@@ -54,7 +54,7 @@ face_identity:
 
 # ROI-scoped human detection, plans/02 — see docs/parameters.md#human_detection_roi-plans02--second-stage.
 human_detection_roi:
-  # yolo_model_path: "yolo11n.onnx"
+  yolo_model_path: "models/yolo11n.onnx"
   roi_expansion_factor: 10.0
   roi_upward_fraction: 0.04
   roi_width_fraction: 0.8

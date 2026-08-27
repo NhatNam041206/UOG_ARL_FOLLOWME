@@ -4,7 +4,7 @@ modules.emergency_stop.interface — no other project module is imported or requ
 run in isolation to validate the module on its own.
 
 Usage:
-    python -m modules.emergency_stop.test_estop <path-to-video-file> [--show]
+    python -m project_tests.emergency_stop.test_estop <path-to-video-file> [--show]
 
 `<path-to-video-file>` must be supplied by the caller — no default video is assumed to exist.
 """

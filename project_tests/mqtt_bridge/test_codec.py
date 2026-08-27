@@ -1,10 +1,10 @@
 """
 Unit tests for mqtt_bridge.codec.encode — pure logic, no MQTT broker or network needed (mirrors
-modules/gesture_hand_keypoint/test_sequence_counts.py's approach: real network-facing behavior
+project_tests/gesture_hand_keypoint/test_sequence_counts.py's approach: real network-facing behavior
 stays untested here, this file covers the string-encoding boundary in isolation).
 
 Run with:
-    python -m pytest modules/mqtt_bridge/test_codec.py -v
+    python -m pytest project_tests/mqtt_bridge/test_codec.py -v
 """
 import pytest
 

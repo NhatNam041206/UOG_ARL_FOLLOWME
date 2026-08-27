@@ -1,15 +1,15 @@
 """
-Unit tests for run_logging.RunLogger. Pure filesystem/JSON logic, no CV models or video files
-needed — run with:
+Unit tests for scripts.run_logging.RunLogger. Pure filesystem/JSON logic, no CV models or video
+files needed — run with:
 
-    python -m pytest test_run_logging.py -v
+    python -m pytest project_tests/test_run_logging.py -v
 """
 import json
 import os
 
 import pytest
 
-from run_logging import RunLogger
+from scripts.run_logging import RunLogger
 
 
 @pytest.fixture

@@ -1,8 +1,8 @@
 """
-Unit tests for tail_log.py (plans/11_registration_interactive_console.md chunk 9) — pure
+Unit tests for scripts/tail_log.py (plans/11_registration_interactive_console.md chunk 9) — pure
 filesystem/string logic, no camera/model/network dependency at all. Run with:
 
-    python -m pytest test_tail_log.py -v
+    python -m pytest project_tests/test_tail_log.py -v
 """
 import json
 import os
@@ -11,7 +11,7 @@ import time as real_time
 
 import pytest
 
-import tail_log
+from scripts import tail_log
 
 
 def test_format_record_flat_fields_with_timestamp():

@@ -13,8 +13,10 @@ Thumbs.db
 
 # Pretrained model weights — large binaries, fetched separately rather than versioned.
 # See each model's own module for the download source if these need restoring.
-/yolo11n.onnx
-# ultralytics auto-download cache — YOLOv8PoseTorch's default weights, lands at repo root
+/models/yolo11n.onnx
+# ultralytics auto-download cache — YOLOv8PoseTorch's default weights, lands at repo root (NOT
+# models/ — modules/autocar/config.py hardcodes this as a bare, cwd-relative filename inside
+# vendored code; see docs/architecture.md's "A note on model file locations")
 /yolov8n-pose.pt
 modules/*/models/*.onnx
 modules/*/models/*.task
@@ -29,7 +31,7 @@ modules/face_identity/raw_captures/*
 !modules/face_identity/raw_captures/.gitkeep
 modules/face_identity/registry_data/*.npz
 modules/*/models/*.npz
-# register_person.py's own raw capture output (front+back frames, both consumers' Phase 2 input)
+# scripts/register_person.py's own raw capture output (front+back frames, both consumers' Phase 2 input)
 registration_captures/
 
 # Autocar vendor tree (modules/autocar) — abandoned GRU wave-classifier training data, not

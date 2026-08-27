@@ -6,7 +6,7 @@ test_gesture_hand_keypoint.py video-based smoke test; this file covers the open_
 lookup added for decision logging, see plans/10_debug_logging_observability.md chunk 2).
 
 Run with:
-    python -m pytest modules/gesture_hand_keypoint/test_sequence_counts.py -v
+    python -m pytest project_tests/gesture_hand_keypoint/test_sequence_counts.py -v
 """
 from dataclasses import dataclass
 from typing import Optional

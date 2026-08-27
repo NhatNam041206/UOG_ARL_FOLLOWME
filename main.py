@@ -74,8 +74,8 @@ from typing import Optional
 import cv2
 import yaml
 
-from debug_stream import DebugStreamServer
-from run_logging import RunLogger
+from scripts.debug_stream import DebugStreamServer
+from scripts.run_logging import RunLogger
 
 _WAVE_STATE_COLOR = {"RED": (0, 0, 255), "YELLOW": (0, 220, 255), "GREEN": (0, 200, 0)}
 
@@ -594,7 +594,7 @@ def main() -> int:
               "opening the interactive console (pass --interactive explicitly to skip this note).")
 
     if args.modules == "register":
-        import register_person
+        from scripts import register_person
 
         if args.interactive:
             # Interactive console path — the headless equivalent of the Tkinter UI's CRUD, now

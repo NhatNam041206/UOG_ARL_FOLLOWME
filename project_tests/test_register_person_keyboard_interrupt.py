@@ -5,7 +5,7 @@ traceback, and must still release the camera and close the logger. No real camer
 cv2.VideoCapture and registration_data.LiveSubjectDetector are both monkeypatched out.
 
 Run with:
-    python -m pytest test_register_person_keyboard_interrupt.py -v
+    python -m pytest project_tests/test_register_person_keyboard_interrupt.py -v
 """
 import json
 import os
@@ -13,9 +13,9 @@ import os
 import numpy as np
 import pytest
 
-import register_person
-import registration_data as data
-from run_logging import RunLogger
+from scripts import register_person
+from scripts import registration_data as data
+from scripts.run_logging import RunLogger
 
 
 class _FakeCapInterruptsOnNthRead:
