@@ -341,19 +341,8 @@ python -m modules.gesture_hand_keypoint.visualize_gesture_hand_keypoint --mode c
 python -m modules.gesture_hand_keypoint.visualize_gesture_hand_keypoint --mode video --video path/to/video.mp4
 ```
 
-### `appearance_verifier`
-
-```bash
-# Test: compare every frame of a video against a folder of reference images
-python -m project_tests.appearance_verifier.test_appearance_verifier path/to/video.mp4 --reference-dir path/to/reference_images/
-
-# Visualization: camera/video (continuous) or a single image
-python -m modules.appearance_verifier.visualize_appearance_verifier --reference-dir path/to/reference_images/ --mode camera [--camera-index 0]
-python -m modules.appearance_verifier.visualize_appearance_verifier --reference-dir path/to/reference_images/ --mode video --video path/to/video.mp4
-python -m modules.appearance_verifier.visualize_appearance_verifier --reference-dir path/to/reference_images/ --mode image --image path/to/candidate.jpg
-```
-First run downloads the Market1501-pretrained OSNet checkpoint (~10MB, one-time, needs network
-access to Google Drive) — see [`technologies.md`](technologies.md).
+`appearance_verifier` was removed 2026-08-27 — dead code, never wired into either live pipeline.
+See [`modules.md`](modules.md#appearance_verifier--removed-2026-08-27).
 
 `modules/target_tracking` and `modules/target_recovery` — REMOVED (2026-08-26). `followme_orchestrator`
 drives `modules/autocar` (via `autocar_adapter.py`) for tracking+recovery instead — see

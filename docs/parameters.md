@@ -182,30 +182,14 @@ conditions, not just good-lighting footage.
 
 ---
 
-## `appearance_verifier` (plans/05)
+## `appearance_verifier` (plans/05) — REMOVED 2026-08-27
 
-OSNet Re-ID embedding + cosine-similarity matching. Was a shared dependency of the now-removed
-`target_tracking`/`target_recovery` (each defined its OWN separate threshold key rather than this
-one). No live caller currently — kept as a runnable standalone tool; `autocar` uses its own
-independent OSNet embedder instead (see that section below), not this module.
-
-| Parameter | Current | Status | Meaning | Tuning notes |
-|---|---|---|---|---|
-| `similarity_threshold` | `null` | 🔴 **⚠️ especially uncalibrated** | Cosine similarity floor `best_similarity_score` must clear for `match_found=True`. | Two documented accuracy risks make a casual "starting guess" here less trustworthy than usual — see below. Test explicitly against BOTH: (1) two DIFFERENT people in similar-colored/styled clothing (should score low — if it doesn't, that's the clothing-confusion risk manifesting), and (2) the SAME person under noticeably different lighting/distance (should score high — if it doesn't, that's the cross-domain risk manifesting). Don't set this from positive examples alone. |
-| `osnet_model_name` | `osnet_x1_0` | 🟢 | Which `torchreid` OSNet variant to build. | Override only if evaluating a different OSNet size/variant. |
-
-**Two named risks — read before calibrating, do not treat as one vague "may be inaccurate" note:**
-1. **Similar-clothing confusion.** OSNet-based appearance matching struggles to distinguish
-   people wearing similar-colored/styled clothing, since appearance embeddings lean heavily on
-   clothing as a feature.
-2. **Cross-domain generalization drop.** Published OSNet benchmarks show accuracy can drop
-   sharply on footage meaningfully different from its training distribution (Market-1501-family
-   datasets) — this project's own campus footage/lighting/camera are an untested domain.
-
-**How to tune:** run
-`python -m modules.appearance_verifier.visualize_appearance_verifier --reference-dir <folder> --mode camera`,
-watch `best_similarity_score` printed per frame against a known reference set, and specifically
-run the two test scenarios above before trusting any threshold value.
+`modules/appearance_verifier` (and its `test_*.py`/`visualize_*.py` tools, and its
+`config/thresholds.yaml` section) was deleted as dead code — never wired into either live
+pipeline; `autocar` uses its own independent OSNet embedder instead (see that section below), and
+no other caller ever adopted this module. Full parameter table/tuning notes are in git history
+(`git log -- docs/parameters.md`) if ever needed for reference. Its only dependencies, `torchreid`
+and `gdown`, were pulled from `requirements.txt` for the same reason (see `docs/technologies.md`).
 
 ---
 
@@ -255,7 +239,7 @@ running the real detector, not by guessing from keypoint confidence.
 | `detect_imgsz` | 320 | 🟢 | YOLOv8-pose inference resolution. Set to 320 directly (a multiple of the max stride 32) — was 300, which ultralytics silently auto-rounded up to 320 every run anyway; this just makes the config say what actually happens. | Any other multiple of 32 works too (e.g. 288, 352) if you want to trade accuracy for speed. |
 | `track_high_thresh` / `track_low_thresh` / `new_track_thresh` / `match_thresh` / `low_match_thresh` / `track_buffer` | 0.6 / 0.1 / 0.7 / 0.8 / 0.5 / 30 | 🟡 each | Their ByteTrack's own tuning knobs — high/low score tiers, IoU match thresholds per stage, how many frames a lost track survives before being dropped. | Carried from their `config.py` unmodified; see `modules/autocar/tracker/byte_tracker.py`'s own docstring for what each does. |
 | `face_similarity_threshold` | 0.363 | 🟡 | SFace cosine similarity cutoff for `TargetLock`'s FRONT-face match (`identity/face_recognizer.py` — real face detection + recognition, not OSNet, as of their commit 8037862). This is opencv_zoo's own documented "same person" cutoff for this exact model, a real published starting point — still worth recalibrating against this project's footage. | Trust more than a typical "starting guess" (it's a published reference value for this exact model), but still verify on real footage before relying on it. |
-| `back_head_similarity_threshold` | 0.7 | 🟡, **especially uncalibrated** | Cosine similarity cutoff for `TargetLock`'s BACK-of-head match — OSNet, used ONLY for this case now (no face visible = facing away). Same OSNet accuracy caveats as `appearance_verifier.similarity_threshold` above — similar-clothing confusion, cross-domain generalization drop (this project's footage vs. MSMT17 training data). | Do not trust past a first smoke test; calibrate against this project's own footage before relying on recovery accuracy. |
+| `back_head_similarity_threshold` | 0.7 | 🟡, **especially uncalibrated** | Cosine similarity cutoff for `TargetLock`'s BACK-of-head match — OSNet, used ONLY for this case now (no face visible = facing away). Same OSNet accuracy caveats documented for OSNet elsewhere in this project — similar-clothing confusion, cross-domain generalization drop (this project's footage vs. MSMT17 training data). | Do not trust past a first smoke test; calibrate against this project's own footage before relying on recovery accuracy. |
 | `reid_head_split_fallback_fraction` | 0.35 | 🟡 | Head-region height as a fraction of bbox height, used only when shoulder keypoints aren't confident enough to place the split line precisely. **Informational only — NOT actually overridable from this file.** `identity/face_region.py` reads this (and `reid_head_crop_width_fraction`) directly off the vendored `config.py` module's own globals, not through `TargetLock`'s constructor, so there's no seam for the adapter to pass an override through. Changing this key in `thresholds.yaml` currently has no effect — a known gap, not a bug, until/unless that seam is added. | Carried from their `REID_HEAD_SPLIT_FALLBACK_FRACTION`; edit their vendored `config.py` directly if this genuinely needs to change (breaks the "vendored tree stays untouched" rule — weigh that first). |
 | `reid_acquire_rounds` / `reid_acquire_cooldown_sec` | 3 / 0.5 | 🟡 each | How many face-only sampling rounds (and the wall-clock gap between them) before `ACQUIRING` picks a target. Only exercised via the adapter's IoU-force-lock fallback path — normal triggers skip `ACQUIRING` entirely (see `docs/modules.md`). | Low-priority to calibrate given how rarely this path runs in practice. |
 | `recovery_timeout_seconds` | `null` | 🔴 (**ours, not theirs**) | Their own reclaim search retries indefinitely with no timeout at all — this closes that gap, mirroring `target_recovery.search_timeout_seconds`'s exact convention. While `null`, a lost target is searched for forever, never reporting back to `followme_orchestrator`. | Spec-equivalent starting range to the old `target_recovery.search_timeout_seconds` (~1–2 minutes) is a reasonable starting point. |

@@ -46,10 +46,10 @@ docstring): modules/emergency_stop/test_estop.py, modules/human_detection/test_h
 modules/face_identity/{test_face_identity, visualize_face_identity}.py,
 modules/human_detection_roi/{test_human_detection_roi, visualize_human_detection_roi}.py,
 modules/gesture_hand_keypoint/{test_gesture_hand_keypoint, visualize_gesture_hand_keypoint}.py,
-modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py,
 modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py.
 (modules/target_tracking and modules/target_recovery were removed 2026-08-26, fully superseded by
-modules/autocar — see docs/parameters.md.)
+modules/autocar — see docs/parameters.md. modules/appearance_verifier was removed 2026-08-27,
+dead code never wired into any live pipeline.)
 This file (main.py) is the general runner that combines modules for actual multi-module/
 multi-person operation.
 
