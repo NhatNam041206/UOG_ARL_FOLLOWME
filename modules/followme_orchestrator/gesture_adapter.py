@@ -37,6 +37,15 @@ class GestureMethodAdapter:
         self._last_result = r
         return r.is_waving, r.waving_state
 
+    @property
+    def last_result(self):
+        """The full GestureMethodResult (including sequence_stage/open_count/close_count/
+        total_confirmed_count) from the most recent evaluate() call — None before the first call.
+        For debug_snapshot.py's use; the (bool, str) tuple evaluate() returns is deliberately
+        narrowed for the orchestrator's own trigger-check logic, this is the escape hatch for
+        logging the fuller picture without changing that narrow return type."""
+        return self._last_result
+
     def draw_debug(self, crop, person_bbox_full_frame: Optional[Tuple[int, int, int, int]] = None) -> None:
         """Draws the last evaluate() call's debug overlay directly onto `crop` (a view into the
         caller's frame) — mirrors main.py's own _GestureMethodAdapter.draw_debug(). No-ops if

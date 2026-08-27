@@ -35,40 +35,94 @@ two alternatives (`modules.wave_facing_gate`, `modules.gesture_trajectory_verifi
 ## Repository layout
 
 ```
-main.py                          Entry point — the only file that imports across modules
-register_person.py               A second composition root (see below) — the registration UI
-registration_data.py             Layer 1 of register_person: filesystem state, CRUD, building
-                                  both registry files
-registration_overlay.py          Layer 2 of register_person: pure frame-in/image-out drawing
+main.py                          Entry point — the ONLY loose Python file at the repo root; every
+                                  other .py file lives under scripts/, modules/, or project_tests/
 config/thresholds.yaml           All tunable parameters, one section per module
+models/                          Loose, non-vendored weight files project-owned modules point at
+                                  via thresholds.yaml (currently yolo11n.onnx) — see "A note on
+                                  model file locations" below for why not every .onnx/.pt in this
+                                  repo lives here
+scripts/                         Everything main.py imports or launches that isn't a per-frame CV
+                                  module — composition-root supporting code AND standalone CLI
+                                  tools alike, all in one place (see "scripts/ contents" below)
+project_tests/                   pytest suites + each module's own standalone test/visualization
+                                  CLI tool, moved out of modules/ — see "Test layout" below for
+                                  why this directory isn't named tests/ or test/
 docs/                            This documentation set
 plans/                           Original per-module design specs (01-04)
 modules/
   emergency_stop/                Collision-avoidance safety layer (runway + 3-zone STOP logic)
   human_detection/                Whole-frame person detector + ByteTrack (also used standalone by
-                                   register_person.py to gate the BACK capture phase)
+                                   scripts/register_person.py to gate the BACK capture phase)
   face_identity/                  Face detect + match against a registered-person database
   human_detection_roi/            ROI-scoped body detector, triggered by a matched face
   gesture_hand_keypoint/          The TRIGGER gesture method: MediaPipe hand-shape sequence
                                    classifier (two alternatives, wave_facing_gate and
                                    gesture_trajectory_verifier, were removed)
-  appearance_verifier/            OSNet Re-ID (shared dependency of target_tracking + target_recovery,
-                                   both superseded — see Post-trigger flow below)
-  target_tracking/                SUPERSEDED by autocar_adapter (below) — kept until the
-                                   replacement is confirmed working, then deleted (docs not updated further)
-  target_recovery/                SUPERSEDED by autocar_adapter (below) — same status
+  appearance_verifier/            OSNet Re-ID — no live caller currently (was a shared dependency
+                                   of target_tracking + target_recovery, both removed — see
+                                   Post-trigger flow below); kept as a runnable standalone tool
   autocar/                        Vendored tracking+recovery backbone (vinhh9608-byte/Autocar,
                                    commit 27ee33a) — YOLOv8-pose + ByteTrack + OSNet TargetLock,
                                    pulled in via `git clone` and kept COMPLETELY UNMODIFIED, not
                                    even a new file added to this directory. See "Post-trigger flow" below.
   followme_orchestrator/          Composes face-first + autocar_adapter (below) into one steppable
                                   step(frame, timestamp) -> FollowMeCommand — see below
+  mqtt_bridge/                    Publishes each frame's FollowMeCommand over MQTT to a Pi 4 motor
+                                  controller (--mqtt only) — consumes the typed FollowMeCommand
+                                  main.py already receives, no reach into followme_orchestrator's
+                                  internals. See docs/mqtt_handoff_pi4.md for the wire contract.
 ```
 
 Each module directory has exactly one importable file, `interface.py` — everything else in that
 directory (`pipeline.py`, `config.py`, detector/estimator wrappers, etc.) is a private
 implementation detail and may change without notice. This is enforced by convention (each
 `interface.py` says so in its docstring), not by Python tooling.
+
+**`scripts/` contents.** One folder for everything that isn't `main.py` itself or a per-frame CV
+module, regardless of whether it's imported or run directly — deliberately not split into
+separate "shared infra" vs. "standalone tool" folders:
+- `register_person.py` — a **second composition root**, same standing as `main.py` (see "Design
+  rules" below and "Registration UI"). Runnable directly via `python -m scripts.register_person
+  <name>` (needs repo root as cwd for its own `modules.face_identity...`-style absolute imports
+  to resolve — see "Test layout" below for the same `-m`-from-repo-root reasoning applied to
+  `project_tests/`), or driven through `main.py --modules register`.
+- `registration_data.py` / `registration_overlay.py` — Layers 1/2 of `register_person.py`'s own
+  three-layer design (see "Registration UI" below); imported only by `register_person.py`.
+- `run_logging.py` / `debug_stream.py` — cross-cutting observability infra, imported by BOTH
+  `main.py` and `register_person.py` (see "Observability infrastructure" below).
+- `tail_log.py` — the one file here that's never imported by anything else in this project, only
+  ever run directly (`python scripts/tail_log.py --latest` or similar — no `-m` needed since it
+  has no internal repo-relative imports of its own).
+
+**A note on model file locations.** Only `yolo11n.onnx` was moved into `models/` — not every
+`.onnx`/`.pt` in this repo. Two things block moving the rest:
+- **`modules/autocar/` is vendored and must stay byte-for-byte unmodified** (design rule #2
+  below) — its own `config.py` hardcodes `POSE_MODEL_PATH = "yolov8n-pose.pt"` as a bare,
+  process-cwd-relative filename (not resolved relative to that file's own location), with no
+  override mechanism this project's `thresholds.yaml` reaches. Since `main.py` always runs from
+  the repo root, `yolov8n-pose.pt` must stay discoverable at `<repo root>/yolov8n-pose.pt` —
+  moving it would silently break `--modules followme` (which drives this file via
+  `autocar_adapter.py`) without touching a single line of vendored code to show why.
+- **`modules/autocar/models/*` and `modules/face_identity/models/*` are already correctly
+  module-scoped** (the former also vendored-adjacent — referenced via paths like
+  `"models/face_detection_yunet_2023mar.onnx"` relative to wherever `modules/autocar/` is used as
+  cwd, per its own standalone-script convention noted under "Debug/visualization architecture"
+  below) — moving either would require touching vendored code (the former) or gain nothing (the
+  latter is not "loose," it's already namespaced under its owning module).
+
+`yolo11n.onnx`, by contrast, was a genuinely loose root-level file used only by three
+NON-vendored modules (`emergency_stop`, `human_detection`, `human_detection_roi`), each already
+supporting a `yolo_model_path` override key in `thresholds.yaml` — moving it to `models/` was a
+config-only change, no code edited.
+
+**Test layout.** `project_tests/` mirrors `modules/`'s subfolder names for each module's own
+`test_*.py`, plus a flat top level for the repo-root pytest suites (`test_run_logging.py`, etc.).
+It is deliberately NOT named `tests/` or `test/` — both collide with real packages already
+installed in this project's own virtualenv (`ultralytics` ships an installed top-level `tests`
+package; CPython's stdlib ships `test`), which would silently shadow this project's own directory
+for any `python -m tests.<module>.test_<name>`-style invocation. Confirmed by direct
+`importlib.util.find_spec()` check against this project's `.venv`, not assumed.
 
 ## Design rules (apply across every module)
 
@@ -85,7 +139,7 @@ gated. See [`docs/parameters.md`](parameters.md) for the full status of every ke
 
 **2. Own-instance isolation, and only `main.py` composes across module boundaries.** No module
 shares a live model, detector, or tracker instance with another module, even when two modules
-use the identical underlying weights file (e.g. `yolo11n.onnx` is loaded independently by
+use the identical underlying weights file (e.g. `models/yolo11n.onnx` is loaded independently by
 `emergency_stop`, `human_detection`, and `human_detection_roi` — three separate `YOLO(...)`
 objects, three separate ByteTrack states). This is a safety/correctness isolation rule, not an
 oversight: it means one module's internal state (tracker IDs, confirmation debounce, motion
@@ -99,7 +153,7 @@ It still never reaches into any composed module's *private* implementation — o
 `interface.py` contracts, exactly as `main.py` already does. This is a composition-root
 exception, not a loophole other modules should also start taking.
 
-`register_person.py` (repo root, alongside `main.py`) is a **second** composition root, for the
+`scripts/register_person.py` is a **second** composition root, for the
 same reason `main.py` is one: it composes across `face_identity` and `modules/autocar`'s vendored
 code to build both registry files from one capture session — see "Registration UI" below.
 `modules/followme_orchestrator/autocar_adapter.py` bridges into `modules/autocar/`'s vendored
@@ -242,7 +296,7 @@ depends on (not part of the vendored repo — exported once via `torchreid`, see
 See [`docs/modules.md`](modules.md) for each module's full working principle and
 [`docs/parameters.md`](parameters.md) for their calibration status.
 
-### Registration UI (`register_person.py` — a second composition root)
+### Registration UI (`scripts/register_person.py` — a second composition root)
 
 Builds the two files `autocar_adapter`/`face_identity` need for a given person, from one capture
 session, via three layers (data / overlay / interact — the same separation of concerns as any
@@ -250,9 +304,9 @@ MVC-style design, applied here for the first time in this project):
 
 ```mermaid
 flowchart LR
-    L1["registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL identity detection happens here"]
-    L2["registration_overlay.py\nLayer 2 — pure frame-in/image-out\ndrawing + the ROI crop, zero I/O"]
-    L3["register_person.py\nLayer 3 — the ONLY file that reads\na camera, opens a window, or reads input"]
+    L1["scripts/registration_data.py\nLayer 1 — filesystem CRUD,\nbuilding both registry files,\nALL identity detection happens here"]
+    L2["scripts/registration_overlay.py\nLayer 2 — pure frame-in/image-out\ndrawing + the ROI crop, zero I/O"]
+    L3["scripts/register_person.py\nLayer 3 — the ONLY file that reads\na camera, opens a window, or reads input"]
     L3 -->|calls| L1
     L3 -->|calls| L2
 ```
@@ -281,12 +335,13 @@ embeddings); BACK feeds only the re-id profile's back-of-head embedding. A fresh
 and Update never mix old and new photos — but the already-built `.npz` files are only overwritten
 once a rebuild actually succeeds, so a failed session never destroys the last known-good profile.
 
-`register_person.py RegistrationApp` (Tkinter — no args) is the primary CRUD interface: New /
-Re-capture / Delete / Refresh, plus a "Follow Me" button that hands a fully-registered person's
-name back to `main.py` (via `RegistrationApp.chosen_name`) to fall through directly into the same
-`followme` camera loop `--then-followme` uses. `register_person.run()` is the same flow headless
-(plain cv2 window, no Tkinter) for scripted/one-person use — both `main.py --modules register
---person-name <name>` and standalone `python register_person.py <name>` call it directly.
+`scripts/register_person.py RegistrationApp` (Tkinter — no args) is the primary CRUD interface:
+New / Re-capture / Delete / Refresh, plus a "Follow Me" button that hands a fully-registered
+person's name back to `main.py` (via `RegistrationApp.chosen_name`) to fall through directly into
+the same `followme` camera loop `--then-followme` uses. `register_person.run()` is the same flow
+headless (plain cv2 window, no Tkinter) for scripted/one-person use — both `main.py --modules
+register --person-name <name>` and standalone `python -m scripts.register_person <name>` call it
+directly.
 
 ## Entry point (`main.py`)
 
@@ -314,7 +369,8 @@ and `trajectory_verifier`/`gesture_trajectory_verifier`) were removed (confirmed
 | `--camera-index N` | OS camera device index; defaults to `config/thresholds.yaml`'s `camera.camera_index`, else `0` |
 | `--modules` | `pretrigger` (stops at TRIGGER) \| `followme` (full pipeline through steering) \| `register` (**default**) — hands off to `register_person`, not a per-frame pipeline |
 | `--face-registry-dir` | Path to registered-person `.npz` files (`pretrigger`/`followme` only) |
-| `--config` | Path to `thresholds.yaml` — passed to `followme_orchestrator.configure()` (`followme`) or `register_person.run()` (`register`) |
+| `--config` | Path to `thresholds.yaml` — passed to `followme_orchestrator.configure()` (`followme`) or `register_person.run()` (`register`); also reused by `mqtt_bridge.configure()` when `--mqtt` is set |
+| `--mqtt` | `followme` only: publish each frame's `FollowMeCommand` over MQTT via `modules.mqtt_bridge` (see `docs/mqtt_handoff_pi4.md`). Off by default — `mqtt_bridge` (and `paho-mqtt`) is never imported unless this is set. |
 | `--person-name` | `register` only: headless single-person registration, no UI. Omit to open the Tkinter UI instead. |
 | `--front-samples` / `--back-samples` | `register` only: sample counts per capture phase (default 15 each) |
 | `--then-followme` | `register --person-name` (headless) only: on success, fall through into the same `followme` camera loop, no second command |
@@ -358,25 +414,363 @@ onto:
    `draw_steering_arrow()` (`followme`), drawn *after* the module overlay so it isn't occluded.
 
 Every module additionally ships its own standalone CLI test/visualization script for isolated
-debugging without the rest of the pipeline:
+debugging without the rest of the pipeline. `test_*.py` files live in `project_tests/<module>/`
+(moved out of `modules/<module>/` — see "Test layout" above); `visualize_*.py` files stay
+colocated inside `modules/<module>/` since they aren't test files:
 
 | Module | Script |
 |---|---|
-| `emergency_stop` | `modules/emergency_stop/test_estop.py` |
-| `human_detection` | `modules/human_detection/test_human_detection.py` |
-| `face_identity` | `modules/face_identity/{test_face_identity,visualize_face_identity}.py` |
-| `human_detection_roi` | `modules/human_detection_roi/{test_human_detection_roi,visualize_human_detection_roi}.py` |
-| `gesture_hand_keypoint` (the TRIGGER gesture method) | `modules/gesture_hand_keypoint/{test_gesture_hand_keypoint,visualize_gesture_hand_keypoint}.py` |
-| `appearance_verifier` | `modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
-| `target_tracking` | `modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py` — SUPERSEDED, same status |
-| `target_recovery` | `modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py` — SUPERSEDED, same status |
-| `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo, exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
-| `followme_orchestrator` | `modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py` — the only tool that exercises the ENTIRE pipeline end-to-end |
+| `emergency_stop` | `project_tests/emergency_stop/test_estop.py` |
+| `human_detection` | `project_tests/human_detection/test_human_detection.py` |
+| `face_identity` | `project_tests/face_identity/test_face_identity.py`, `modules/face_identity/visualize_face_identity.py` |
+| `human_detection_roi` | `project_tests/human_detection_roi/test_human_detection_roi.py`, `modules/human_detection_roi/visualize_human_detection_roi.py` |
+| `gesture_hand_keypoint` (the TRIGGER gesture method) | `project_tests/gesture_hand_keypoint/test_gesture_hand_keypoint.py`, `modules/gesture_hand_keypoint/visualize_gesture_hand_keypoint.py` |
+| `appearance_verifier` | `project_tests/appearance_verifier/test_appearance_verifier.py`, `modules/appearance_verifier/visualize_appearance_verifier.py` — no longer in the live call path (see Post-trigger flow) but still standalone-runnable |
+| `autocar` (vendored) | `modules/autocar/main.py --target modules/autocar/models/enrolled_<name>.npz` — THEIR OWN standalone demo (never moved — vendored, untouched), exercises their tracking+recovery engine directly against one enrolled profile, entirely independent of `autocar_adapter`/`followme_orchestrator` (must be run with `modules/autocar/` as the working directory — their internal paths are relative to it) |
+| `followme_orchestrator` | `project_tests/followme_orchestrator/test_followme_orchestrator.py`, `modules/followme_orchestrator/visualize_followme_orchestrator.py` — the latter is the only tool that exercises the ENTIRE pipeline end-to-end |
+| `mqtt_bridge` | `project_tests/mqtt_bridge/test_codec.py` — pure `codec.py` unit tests, no broker needed |
 
 `face_identity` also ships a two-phase registration flow, separate from testing:
 `capture_face_images.py` (Phase 1 — save padded face crops to `raw_captures/<person>/`) then
 `build_face_registry.py` (Phase 2 — re-detect, align, embed, and write `registry_data/<person>.npz`).
 Splitting these lets you swap which photos back a registered person without re-running capture.
+
+## Class diagram
+
+Split into six focused diagrams rather than one giant one — a single diagram covering every class
+in the repo would be unreadable. Each groups classes that actually collaborate; a class named in
+more than one diagram (e.g. `TrackingResult`, `SteeringController`) is the same class, just shown
+from a different angle. `<<vendored>>` marks classes from `modules/autocar` (kept byte-for-byte
+unmodified — see "Repository layout" above); `<<module>>` marks a file that's a flat collection of
+functions, not an actual class, shown here anyway because other classes depend on it directly.
+
+### 1. Pre-trigger pipeline (`face_identity` → `human_detection_roi` → `gesture_hand_keypoint`)
+
+```mermaid
+classDiagram
+    class FaceIdentityResult {
+        +bool face_found
+        +Tuple face_bbox
+        +bool is_registered_match
+        +str matched_person_name
+        +float match_confidence
+        +float face_detection_confidence
+        +draw_debug(frame)
+    }
+    class FaceRegistry {
+        +__init__(registry_dir)
+    }
+    class HumanDetectionResult {
+        +bool person_found
+        +Tuple person_bbox
+        +float detection_confidence
+        +draw_debug(frame, face_bbox)
+    }
+    class GestureMethodResult {
+        +int track_id
+        +bool is_waving
+        +str waving_state
+        +str sequence_stage
+        +int open_count
+        +int close_count
+        +int total_confirmed_count
+        +float confidence_debug
+        +object keypoints_raw
+        +draw_debug(frame, person_bbox_full_frame)
+    }
+    class GestureHandKeypointPipeline {
+        -HandLandmarkerWrapper detector
+        -Dict~int,_TrackState~ _tracks
+        +evaluate(track_id, crop, ts, bbox) PipelineResult
+        +release_track(track_id)
+    }
+    class _TrackState {
+        +SequenceStateMachine sequence_machine
+        +ConfirmationTracker waving_tracker
+        +int total_confirmed_count
+    }
+    class SequenceStateMachine {
+        +str stage
+        +update(hand_shape, height_gate_pass, ts, config) str
+        +reset()
+    }
+    class ConfirmationTracker {
+        +update(condition, ts, config) str
+    }
+    class HandLandmarkerWrapper {
+        +detect(crop) List~DetectedHand~
+    }
+    class _GestureMethodAdapter {
+        <<main.py own copy, isolation convention>>
+        +evaluate(track_id, crop, ts, bbox) Tuple
+        +last_result GestureMethodResult
+    }
+
+    GestureHandKeypointPipeline "1" *-- "*" _TrackState : keyed by track_id
+    _TrackState *-- SequenceStateMachine
+    _TrackState *-- ConfirmationTracker
+    GestureHandKeypointPipeline *-- HandLandmarkerWrapper
+    GestureHandKeypointPipeline ..> GestureMethodResult : produces
+    _GestureMethodAdapter ..> GestureMethodResult : wraps interface.evaluate()
+    FaceIdentityResult ..> HumanDetectionResult : face_bbox feeds ROI
+    HumanDetectionResult ..> GestureMethodResult : person_bbox feeds gesture crop
+```
+
+### 2. Post-trigger — tracking, recovery & steering (`autocar_adapter` + vendored `modules/autocar`)
+
+```mermaid
+classDiagram
+    class TrackingResult {
+        +bool target_locked
+        +float horizontal_offset
+        +Tuple person_bbox
+        +str state
+        +bool just_reacquired
+        +draw_debug(frame)
+    }
+    class _AutocarEngine {
+        -YOLOv8PoseTorch detector
+        -OSNetEmbedder osnet_embedder
+        -FaceRecognizer face_recognizer
+        -BYTETracker tracker
+        -TargetLock lock
+        +start(person_name, bbox, frame, ts)
+        +update(frame, ts) TrackingResult
+        +warmup()
+    }
+    class TargetLock {
+        <<vendored>>
+        +int locked_track_id
+        +float last_verify_score
+        +update(tracks, frame) int
+    }
+    class BYTETracker {
+        <<vendored>>
+        +update(detections) List~TrackedObject~
+    }
+    class YOLOv8PoseTorch {
+        <<vendored>>
+        +detect(frame) List~Detection~
+    }
+    class OSNetEmbedder {
+        <<vendored>>
+        +embed(crop) ndarray
+    }
+    class FaceRecognizer {
+        <<vendored>>
+        +recognize(crop) float
+    }
+    class SteeringController {
+        +float kp
+        +float ki
+        +float kd
+        +float max_steering_angle_degrees
+        +float servo_center_degrees
+        +float fov_degrees
+        +is_calibrated() bool
+        +update(horizontal_offset, ts) float
+        +reset()
+    }
+    class FollowMeCommand {
+        +bool should_move
+        +float steering_angle_degrees
+        +str debug_state
+    }
+
+    _AutocarEngine *-- TargetLock
+    _AutocarEngine *-- BYTETracker
+    _AutocarEngine *-- YOLOv8PoseTorch
+    _AutocarEngine *-- OSNetEmbedder
+    _AutocarEngine *-- FaceRecognizer
+    _AutocarEngine ..> TrackingResult : produces
+    TrackingResult --> SteeringController : horizontal_offset
+    SteeringController ..> FollowMeCommand : steering_angle_degrees = servo_center_degrees plus-or-minus clamped PID error
+```
+
+### 3. `followme_orchestrator` — the composition root for the whole post-trigger phase
+
+```mermaid
+classDiagram
+    class FollowMeOrchestratorPipeline {
+        -FaceRegistry registry
+        -GestureMethodAdapter gesture_adapter
+        -SteeringController steering
+        -bool _tracking_active
+        -str _target_person_name
+        +step(frame, ts) PipelineResult
+        +debug_snapshot() dict
+        +draw_debug(frame)
+    }
+    class GestureMethodAdapter {
+        -GestureMethodResult _last_result
+        +evaluate(track_id, crop, ts, bbox) Tuple
+        +last_result GestureMethodResult
+        +draw_debug(crop, bbox)
+    }
+    class build_debug_snapshot {
+        <<module: debug_snapshot.py>>
+        +build_debug_snapshot(face, person, gesture, tracking) dict
+    }
+    class _AutocarEngine {
+        <<see diagram 2>>
+    }
+    class SteeringController {
+        <<see diagram 2>>
+    }
+    class FaceIdentityResult {
+        <<see diagram 1>>
+    }
+    class HumanDetectionResult {
+        <<see diagram 1>>
+    }
+    class FollowMeCommand {
+        <<see diagram 2>>
+    }
+
+    FollowMeOrchestratorPipeline *-- GestureMethodAdapter
+    FollowMeOrchestratorPipeline *-- SteeringController
+    FollowMeOrchestratorPipeline ..> _AutocarEngine : autocar_adapter.start()/update()
+    FollowMeOrchestratorPipeline ..> FaceIdentityResult : evaluate_face()
+    FollowMeOrchestratorPipeline ..> HumanDetectionResult : evaluate_person()
+    FollowMeOrchestratorPipeline ..> build_debug_snapshot : debug_snapshot()
+    FollowMeOrchestratorPipeline ..> FollowMeCommand : step() returns
+```
+
+### 4. Registration (Tkinter UI, headless CLI, and the interactive console)
+
+```mermaid
+classDiagram
+    class PersonStatus {
+        +str name
+        +int raw_front_count
+        +int raw_back_count
+        +int cropped_front_count
+        +int cropped_back_count
+        +bool has_face_registry
+        +bool has_target_profile
+        +ready_for_followme bool
+    }
+    class LiveSubjectDetector {
+        -YOLOv8PoseTorch _detector
+        +count_in_roi(frame, roi_percent) int
+    }
+    class CaptureWindow {
+        <<tk.Toplevel>>
+        -cv2.VideoCapture cap
+        -LiveSubjectDetector detector
+        -str _state
+        +_tick()
+        +_cancel()
+    }
+    class RegistrationApp {
+        <<tk.Tk>>
+        -str chosen_name
+        +_refresh()
+        +_start_capture(name)
+        +_on_delete()
+        +_on_follow_me()
+    }
+    class register_person_module {
+        <<module: scripts/register_person.py>>
+        +run(person_name, camera_index, ..., show, stream, logger) int
+        +run_interactive(camera_index, ..., stream, logger) (int, chosen_name)
+    }
+
+    RegistrationApp *-- CaptureWindow : opens one per capture session
+    CaptureWindow *-- LiveSubjectDetector
+    register_person_module ..> LiveSubjectDetector : run() constructs directly (no Tkinter)
+    register_person_module ..> PersonStatus : list/delete via registration_data
+```
+`run_interactive()` (the console's `register <name>` command) calls `run()` directly, unmodified
+— both are functions on this same module, not a class relationship, so not drawn as an arrow
+above; see [`plans/11_registration_interactive_console.md`](../plans/11_registration_interactive_console.md) §3.3.3.
+`run_interactive()`'s `follow <name>` command is the console's own equivalent of
+`RegistrationApp._on_follow_me()` above — both select a fully-registered person and hand that
+choice back to `main.py` to fall through into the shared followme camera loop (`chosen_name`
+return value here; `self.chosen_name` instance attribute there, since `mainloop()` returns
+nothing usable).
+
+### 5. Observability infrastructure (`scripts/run_logging.py`, `scripts/debug_stream.py`, `scripts/tail_log.py`)
+
+Cross-cutting — not tied to any one pipeline, used by `main.py`'s pretrigger/followme loops and
+by `scripts/register_person.py`'s headless/interactive paths alike. All three live in `scripts/`
+alongside `register_person.py` and its own two layers — see "`scripts/` contents" above for why
+this project doesn't split "shared infra" from "standalone tool" into separate folders. See
+[`plans/10_debug_logging_observability.md`](../plans/10_debug_logging_observability.md) and
+[`plans/11_registration_interactive_console.md`](../plans/11_registration_interactive_console.md).
+
+```mermaid
+classDiagram
+    class RunLogger {
+        -str run_dir
+        +start(mode, argv, source_desc, config_path) str
+        +log_frame(**fields)
+        +set_video_info(path, fps, resolution)
+        +set_stream_info(url)
+        +close(frame_count, exit_reason)
+    }
+    class DebugStreamServer {
+        -_FrameBuffer _buffer
+        -ThreadingHTTPServer _httpd
+        +start(port, host, throttle_every_n_frames, jpeg_quality) str
+        +update_frame(frame)
+        +stop()
+    }
+    class _FrameBuffer {
+        -bytes _jpeg
+        +set_frame(frame, quality)
+        +get_jpeg() bytes
+    }
+    class tail_log_module {
+        <<module: scripts/tail_log.py>>
+        +format_record(record) str
+        +find_latest_run(log_root) str
+        +tail_file(path, initial_lines) int
+    }
+
+    DebugStreamServer *-- _FrameBuffer
+    tail_log_module ..> RunLogger : reads decisions.jsonl RunLogger writes — READ ONLY, never mutates
+```
+
+### 6. Standalone / no live caller (kept as runnable tools, not wired into any pipeline)
+
+```mermaid
+classDiagram
+    class EStopDecision {
+        <<enumeration>>
+        GO
+        STOP
+        UNCERTAIN
+    }
+    class EStopOutput {
+        +EStopDecision decision
+        +str reason
+        +int triggering_track_id
+        +str zone
+        +float timestamp
+    }
+    class EmergencyStopModule {
+        +float last_latency_ms
+        +process_frame(frame) EStopOutput
+    }
+    class AppearanceVerifierResult {
+        +bool match_found
+        +float best_similarity_score
+        +int reference_frame_count
+    }
+    class PersonDetection {
+        +int track_id
+        +Tuple bbox
+        +float confidence
+    }
+    class HumanDetectionModule {
+        +detect(frame) List~PersonDetection~
+    }
+
+    EmergencyStopModule ..> EStopOutput : produces
+    EStopOutput --> EStopDecision
+    HumanDetectionModule ..> PersonDetection : produces
+```
 
 ## See also
 

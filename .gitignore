@@ -13,8 +13,10 @@ Thumbs.db
 
 # Pretrained model weights — large binaries, fetched separately rather than versioned.
 # See each model's own module for the download source if these need restoring.
-/yolo11n.onnx
-# ultralytics auto-download cache — YOLOv8PoseTorch's default weights, lands at repo root
+/models/yolo11n.onnx
+# ultralytics auto-download cache — YOLOv8PoseTorch's default weights, lands at repo root (NOT
+# models/ — modules/autocar/config.py hardcodes this as a bare, cwd-relative filename inside
+# vendored code; see docs/architecture.md's "A note on model file locations")
 /yolov8n-pose.pt
 modules/*/models/*.onnx
 modules/*/models/*.task
@@ -29,7 +31,7 @@ modules/face_identity/raw_captures/*
 !modules/face_identity/raw_captures/.gitkeep
 modules/face_identity/registry_data/*.npz
 modules/*/models/*.npz
-# register_person.py's own raw capture output (front+back frames, both consumers' Phase 2 input)
+# scripts/register_person.py's own raw capture output (front+back frames, both consumers' Phase 2 input)
 registration_captures/
 
 # Autocar vendor tree (modules/autocar) — abandoned GRU wave-classifier training data, not
@@ -41,3 +43,8 @@ modules/autocar/data/*.npz
 # adapter always runs with THIS repo's root as CWD (not modules/autocar/), so it lands here,
 # at the top level, not inside the vendored tree. Session-only, gitignored in their own repo too.
 /temp_dataset/
+
+# main.py run artifacts (plans/10_debug_logging_observability.md) — per-run decision logs, run
+# manifests, and optional debug video, written to runs/<timestamp>_<mode>/ every pretrigger/
+# followme run. Run artifacts, not project source; scp them off the Pi instead of committing them.
+/runs/

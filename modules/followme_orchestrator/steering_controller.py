@@ -13,14 +13,19 @@ is a correctness requirement, not a style preference.
 from typing import Optional
 
 
+DEFAULT_SERVO_CENTER_DEGREES = 90.0  # fallback if config/thresholds.yaml's steering.servo_center_degrees is unset
+
+
 class SteeringController:
     def __init__(self, kp: Optional[float], ki: Optional[float], kd: Optional[float],
-                 max_steering_angle_degrees: Optional[float], fov_degrees: Optional[float]):
+                 max_steering_angle_degrees: Optional[float], fov_degrees: Optional[float],
+                 servo_center_degrees: float = DEFAULT_SERVO_CENTER_DEGREES):
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.max_steering_angle_degrees = max_steering_angle_degrees
         self.fov_degrees = fov_degrees
+        self.servo_center_degrees = servo_center_degrees
         self._integral = 0.0
         self._last_error_degrees: Optional[float] = None
         self._last_timestamp: Optional[float] = None
@@ -49,8 +54,13 @@ class SteeringController:
         here — BEFORE running PID, so kp/ki/kd are
         tuned against real degrees of error, not an abstract -1..+1 unit.
 
-        Returns a signed angle in degrees, clamped to +/- max_steering_angle_degrees (an
-        Ackermann/servo hardware limit).
+        Returns the ABSOLUTE servo angle in degrees, ready to write directly to the servo — no
+        further conversion needed downstream. self.servo_center_degrees (config:
+        steering.servo_center_degrees, default 90) = straight ahead; the PID's internal signed
+        error output is clamped to +/- max_steering_angle_degrees around that center, so the
+        returned value always falls in
+        [servo_center_degrees - max_steering_angle_degrees, servo_center_degrees + max_steering_angle_degrees]
+        (e.g. center=90, max_steering_angle_degrees=45 -> range [45, 135], 90=straight).
 
         Caller must check is_calibrated() first — this raises if any gain or fov_degrees is None,
         rather than silently computing a meaningless output from missing calibration.
@@ -76,4 +86,5 @@ class SteeringController:
         self._last_error_degrees = error_degrees
         self._last_timestamp = timestamp
 
-        return max(-self.max_steering_angle_degrees, min(self.max_steering_angle_degrees, output))
+        clamped_error = max(-self.max_steering_angle_degrees, min(self.max_steering_angle_degrees, output))
+        return self.servo_center_degrees + clamped_error

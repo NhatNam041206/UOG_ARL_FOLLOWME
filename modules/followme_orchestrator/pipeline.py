@@ -32,6 +32,7 @@ from modules.human_detection_roi.interface import evaluate as evaluate_person
 from . import autocar_adapter
 from .autocar_adapter import start as tracking_start, update as tracking_update
 from .config import FollowMeOrchestratorConfig
+from .debug_snapshot import build_debug_snapshot
 from .gesture_adapter import GestureMethodAdapter
 from .steering_controller import SteeringController
 
@@ -58,6 +59,7 @@ class FollowMeOrchestratorPipeline:
         self.gesture_adapter = GestureMethodAdapter()
         self.steering = SteeringController(
             config.kp, config.ki, config.kd, config.max_steering_angle_degrees, config.fov_degrees,
+            config.servo_center_degrees,
         )
 
         # Eagerly load EVERY model this pipeline will need, right now, rather than lazily on
@@ -200,6 +202,31 @@ class FollowMeOrchestratorPipeline:
 
         # Defensive fallback — autocar_adapter's state is always one of the three handled above.
         return PipelineResult(False, None, "UNKNOWN_TRACKING_STATE")
+
+    def debug_snapshot(self) -> dict:
+        """
+        Plain-dict snapshot of this frame's decision-relevant fields, for structured logging
+        (plans/10_debug_logging_observability.md) — NOT part of the frame-to-frame FollowMeCommand
+        contract, keys may be added/removed without notice. Built by debug_snapshot.py from
+        whichever phase(s) THIS step() call actually ran (same "only what ran this frame"
+        convention as draw_debug() below) — face_identity/human_detection_roi/gesture use only the
+        FIRST registered face evaluated this frame (mirrors _step_pre_trigger's own "first GREEN
+        becomes the target" priority), all None while a tracking episode is active since the
+        pre-trigger phase doesn't run then. Must be called AFTER step(), same convention as
+        draw_debug()/draw_steering_arrow().
+        """
+        face_result, person_result = (self._debug_pretrigger[0] if self._debug_pretrigger else (None, None))
+        # gesture_adapter.last_result is stashed across frames (never cleared) — only trust it as
+        # THIS frame's result when person_result.person_found is True, the exact condition under
+        # which _step_pre_trigger actually called evaluate() for this (first) face this frame;
+        # otherwise it would silently report a stale result from a previous frame/face.
+        gesture_result = self.gesture_adapter.last_result if (person_result is not None and person_result.person_found) else None
+        return build_debug_snapshot(
+            face_result=face_result,
+            person_result=person_result,
+            gesture_result=gesture_result,
+            tracking_result=self._debug_tracking_result,
+        )
 
     def draw_debug(self, frame: np.ndarray) -> None:
         """

@@ -55,6 +55,11 @@ class GestureMethodResult:
     sequence_stage: str = "WAITING_OPEN"       # WAITING_OPEN | WAITING_CLOSE_1 | WAITING_OPEN_2 |
                                                  # WAITING_CLOSE_2 | CONFIRMED — furthest-advanced
                                                  # hand's stage this frame, for debugging the sequence
+    open_count: int = 0                        # opens consumed so far in the CURRENT attempt (0-2),
+                                                 # a pure function of sequence_stage — debug/logging only
+    close_count: int = 0                       # closes consumed so far in the CURRENT attempt (0-2)
+    total_confirmed_count: int = 0             # cumulative CONFIRMED pulses for this track_id,
+                                                 # session lifetime (since the last release_track())
 
     def draw_debug(self, frame: np.ndarray,
                     person_bbox_full_frame: Optional[Tuple[int, int, int, int]] = None) -> None:
@@ -118,6 +123,9 @@ def evaluate(track_id: int, person_crop_bgr: np.ndarray, timestamp: float,
         keypoints_raw=result.hands_raw,
         palm_facing_camera_debug=result.palm_facing_camera_debug,
         sequence_stage=result.sequence_stage,
+        open_count=result.open_count,
+        close_count=result.close_count,
+        total_confirmed_count=result.total_confirmed_count,
     )
 
 

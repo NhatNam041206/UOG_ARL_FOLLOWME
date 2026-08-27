@@ -18,8 +18,8 @@ module selection/wiring lives here in the root entry point, not inside any modul
                  user — hand_keypoint is the only TRIGGER gesture method now), so there's no
                  longer a method to choose.
     followme     The FULL pipeline (plans/01-08): everything "pretrigger" does, but continuing
-                 past the trigger into modules.followme_orchestrator — target_tracking (record +
-                 follow), target_recovery (re-acquire on loss), and PID steering. Composes
+                 past the trigger into modules.followme_orchestrator — tracking + recovery (via
+                 modules.autocar, driven through autocar_adapter.py) and PID steering. Composes
                  modules.followme_orchestrator.interface (configure()/step()) rather than
                  re-implementing that sequencing here — see docs/architecture.md's isolation
                  exception note for why that module, not this file, owns the composition.
@@ -47,9 +47,9 @@ modules/face_identity/{test_face_identity, visualize_face_identity}.py,
 modules/human_detection_roi/{test_human_detection_roi, visualize_human_detection_roi}.py,
 modules/gesture_hand_keypoint/{test_gesture_hand_keypoint, visualize_gesture_hand_keypoint}.py,
 modules/appearance_verifier/{test_appearance_verifier,visualize_appearance_verifier}.py,
-modules/target_tracking/{test_target_tracking,visualize_target_tracking}.py,
-modules/target_recovery/{test_target_recovery,visualize_target_recovery}.py,
 modules/followme_orchestrator/{test_followme_orchestrator,visualize_followme_orchestrator}.py.
+(modules/target_tracking and modules/target_recovery were removed 2026-08-26, fully superseded by
+modules/autocar — see docs/parameters.md.)
 This file (main.py) is the general runner that combines modules for actual multi-module/
 multi-person operation.
 
@@ -69,9 +69,13 @@ import argparse
 import os
 import sys
 import time
+from typing import Optional
 
 import cv2
 import yaml
+
+from scripts.debug_stream import DebugStreamServer
+from scripts.run_logging import RunLogger
 
 _WAVE_STATE_COLOR = {"RED": (0, 0, 255), "YELLOW": (0, 220, 255), "GREEN": (0, 200, 0)}
 
@@ -97,6 +101,28 @@ def draw_lines(frame, lines, start_y: int, color, line_height: int = 26) -> int:
         cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         y += line_height
     return y
+
+
+def open_debug_video_writer(cap, run_dir: str):
+    """
+    Opens an MJPG/.avi VideoWriter sized/framerated to match `cap`, for saving the annotated
+    debug overlay to runs/<run_id>/debug.avi (see plans/10_debug_logging_observability.md chunk
+    5). MJPG chosen deliberately over mp4v/H.264: this project targets a Raspberry Pi with no
+    hardware video encoder wired in, and software H.264 encode is noticeably heavier on CPU than
+    Motion-JPEG — a debug artifact you scp once and delete doesn't need the compression, and
+    stealing fewer cycles from the tracking loop itself matters more here than file size.
+
+    Returns (writer, video_path, fps, (width, height)).
+    """
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 1.0:
+        fps = 20.0  # many webcams report 0/garbage here — a documented fallback, not a measurement
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    video_path = os.path.join(run_dir, "debug.avi")
+    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+    writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+    return writer, video_path, fps, (width, height)
 
 
 def open_capture(args: argparse.Namespace):
@@ -130,6 +156,14 @@ class _GestureMethodAdapter:
         self._last_result = r
         return r.is_waving, r.waving_state, extra
 
+    @property
+    def last_result(self):
+        """The full GestureMethodResult from the most recent evaluate() call (sequence_stage,
+        open_count, close_count, total_confirmed_count, ...) — None before the first call. The
+        (bool, str, str) tuple evaluate() returns is a narrowed view for the printed line; this is
+        the escape hatch for structured logging (see run_logging.RunLogger)."""
+        return self._last_result
+
     def draw_debug(self, crop, person_bbox_full_frame=None) -> None:
         """Draws the last evaluate() call's debug overlay directly onto `crop` (a view into the
         caller's frame) — same overlay gesture_hand_keypoint's own visualize_*.py script draws.
@@ -142,7 +176,8 @@ class _GestureMethodAdapter:
         self._module.release_track(track_id)
 
 
-def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
+def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str, logger: RunLogger,
+                             stream: Optional[DebugStreamServer] = None) -> int:
     """
     --modules pretrigger — the exploratory pipeline from plans/01-04, stopping at the trigger:
         full frame -> face detect+match -> ROI-scoped human detection -> chosen gesture method
@@ -158,7 +193,13 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
     face_registry = FaceRegistry(args.face_registry_dir)
     gesture = _GestureMethodAdapter()
 
+    video_writer = None
+    if args.save_video:
+        video_writer, video_path, fps, resolution = open_debug_video_writer(cap, logger.run_dir)
+        logger.set_video_info(video_path, fps, resolution)
+
     frame_idx = 0
+    exit_reason = "completed"
     try:
         while True:
             ret, frame = cap.read()
@@ -166,14 +207,16 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
                 break
             timestamp = time.time()
             frame_h, frame_w = frame.shape[:2]
+            want_overlay = args.show or args.save_video or stream is not None  # draw even headlessly if saving/streaming
 
             face_results = [r for r in evaluate_face(frame, face_registry) if r.is_registered_match]
             line = f"mode=PRETRIGGER frame={frame_idx:06d} faces_matched={len(face_results)}"
+            people_log = []
 
             for face in face_results:
                 person = evaluate_person(frame, face.face_bbox)
 
-                if args.show and args.debug:
+                if want_overlay and args.debug:
                     # Phase 1/2 overlay: face bbox + ROI region + person bbox, drawn even when
                     # person_found is False (the ROI itself is still useful to see) — the exact
                     # overlay modules/face_identity's and modules/human_detection_roi's own
@@ -183,6 +226,11 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
 
                 if not person.person_found:
                     line += f" | {face.matched_person_name}: person_not_found"
+                    people_log.append({
+                        "matched_person_name": face.matched_person_name,
+                        "match_confidence": face.match_confidence,
+                        "person_found": False,
+                    })
                     continue
 
                 px, py, pw, ph = person.person_bbox
@@ -208,8 +256,22 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
                     f" | {face.matched_person_name}: is_waving={is_waving} state={waving_state} "
                     f"TRIGGER={trigger} bbox=({px},{py},{pw},{ph}) ({extra})"
                 )
+                gesture_result = gesture.last_result
+                people_log.append({
+                    "matched_person_name": face.matched_person_name,
+                    "match_confidence": face.match_confidence,
+                    "person_found": True,
+                    "detection_confidence": person.detection_confidence,
+                    "person_bbox": [px, py, pw, ph],
+                    "waving_state": waving_state,
+                    "trigger": trigger,
+                    "sequence_stage": gesture_result.sequence_stage if gesture_result else None,
+                    "open_count": gesture_result.open_count if gesture_result else None,
+                    "close_count": gesture_result.close_count if gesture_result else None,
+                    "total_confirmed_count_session": gesture_result.total_confirmed_count if gesture_result else None,
+                })
 
-                if args.show:
+                if want_overlay:
                     if args.debug:
                         # Phase 3 overlay: gesture method's own keypoints/skeleton/state, drawn
                         # on top of phase 1/2's overlay above.
@@ -232,17 +294,39 @@ def run_pretrigger_pipeline(cap, args: argparse.Namespace, source_desc: str) -> 
             # (one entry per REGISTERED person, never per stranger), so leaving a track's state
             # allocated indefinitely isn't a real memory concern at this project's scale.
             print(line)
+            logger.log_frame(frame=frame_idx, ts=timestamp, mode="pretrigger", people=people_log)
+
+            if video_writer is not None:
+                video_writer.write(frame)
+            if stream is not None:
+                stream.update_frame(frame)
 
             if args.show:
                 cv2.imshow("main (pretrigger pipeline)", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
+                    exit_reason = "user_quit"
                     break
 
             frame_idx += 1
+    except KeyboardInterrupt:
+        # A legitimate way to stop a headless run: with no --show, there's no 'q'-key path at
+        # all (cv2.waitKey() is never even called), so Ctrl+C is the ONLY way to stop a --mode
+        # camera run early. KeyboardInterrupt is a BaseException, not an Exception — the
+        # `except Exception` clause below never catches it, so without this it would propagate
+        # as a raw traceback instead of exiting cleanly (the `finally` cleanup below still runs
+        # either way — this is about the exit message/reason, not resource safety).
+        print("\nInterrupted, stopping.")
+        exit_reason = "user_quit"
+    except Exception:
+        exit_reason = "error"
+        raise
     finally:
         cap.release()
         if args.show:
             cv2.destroyAllWindows()
+        if video_writer is not None:
+            video_writer.release()
+        logger.close(frame_count=frame_idx, exit_reason=exit_reason)
 
     print(f"Processed {frame_idx} frames from {source_desc}.")
     return 0
@@ -258,11 +342,12 @@ _FOLLOWME_STATE_COLOR = {
 }
 
 
-def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> int:
+def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logger: RunLogger,
+                           stream: Optional[DebugStreamServer] = None) -> int:
     """
     --modules followme — the FULL pipeline (plans/01-08): everything run_pretrigger_pipeline()
-    above does, continuing PAST the trigger into modules.followme_orchestrator — target_tracking
-    (record + follow), target_recovery (re-acquire on loss), and PID steering.
+    above does, continuing PAST the trigger into modules.followme_orchestrator — tracking +
+    recovery (via modules.autocar, driven through autocar_adapter.py) and PID steering.
 
     Composes modules.followme_orchestrator.interface (configure() once, then step() per frame)
     rather than re-implementing that sequencing here — that module is the one deliberate,
@@ -283,28 +368,48 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> in
     (draw_steering_arrow()) is drawn separately, whenever --show is on, independent of --debug —
     it's the actual calculated robot command, not a per-phase debug readout.
     """
-    from modules.followme_orchestrator.interface import configure, draw_debug, draw_steering_arrow, step
+    from modules.followme_orchestrator.interface import configure, debug_snapshot, draw_debug, draw_steering_arrow, step
 
     configure(thresholds_config_path=args.config, face_registry_dir=args.face_registry_dir)
 
+    # Lazy import, only when --mqtt is set — so an environment without paho-mqtt installed is
+    # never affected by a plain (non-MQTT) followme run (see main.py's --mqtt help text).
+    if args.mqtt:
+        from modules.mqtt_bridge.interface import close as mqtt_close, configure as mqtt_configure, publish as mqtt_publish
+        mqtt_configure(args.config)
+
+    video_writer = None
+    if args.save_video:
+        video_writer, video_path, fps, resolution = open_debug_video_writer(cap, logger.run_dir)
+        logger.set_video_info(video_path, fps, resolution)
+
     frame_idx = 0
+    exit_reason = "completed"
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             timestamp = time.time()
+            want_overlay = args.show or args.save_video or stream is not None  # draw even headlessly if saving/streaming
 
             command = step(frame, timestamp)
+            if args.mqtt:
+                mqtt_publish(command, timestamp)
             color = _FOLLOWME_STATE_COLOR.get(command.debug_state, (255, 255, 255))
-            angle_str = f"{command.steering_angle_degrees:+.1f}" if command.steering_angle_degrees is not None else "None"
+            angle_str = f"{command.steering_angle_degrees:.1f}" if command.steering_angle_degrees is not None else "None"
             line = (
                 f"mode=FOLLOWME frame={frame_idx:06d} debug_state={command.debug_state:28s} "
                 f"should_move={command.should_move} steering_angle_degrees={angle_str}"
             )
             print(line)
+            logger.log_frame(
+                frame=frame_idx, ts=timestamp, debug_state=command.debug_state,
+                should_move=command.should_move, steering_angle_degrees=command.steering_angle_degrees,
+                **debug_snapshot(),
+            )
 
-            if args.show:
+            if want_overlay:
                 if args.debug:
                     # Phase overlays (face/ROI/gesture/tracking/recovery), drawn first so the
                     # summary text below isn't occluded by it — same layering convention as
@@ -318,15 +423,40 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str) -> in
                 # actual robot command, not a per-phase debug readout); no-ops on its own when
                 # should_move is False, so it simply doesn't appear while stopped.
                 draw_steering_arrow(frame, command)
+
+            if video_writer is not None:
+                video_writer.write(frame)
+            if stream is not None:
+                stream.update_frame(frame)
+
+            if args.show:
                 cv2.imshow("main (followme pipeline)", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
+                    exit_reason = "user_quit"
                     break
 
             frame_idx += 1
+    except KeyboardInterrupt:
+        # A legitimate way to stop a headless run: with no --show, there's no 'q'-key path at
+        # all (cv2.waitKey() is never even called), so Ctrl+C is the ONLY way to stop a --mode
+        # camera run early. KeyboardInterrupt is a BaseException, not an Exception — the
+        # `except Exception` clause below never catches it, so without this it would propagate
+        # as a raw traceback instead of exiting cleanly (the `finally` cleanup below still runs
+        # either way — this is about the exit message/reason, not resource safety).
+        print("\nInterrupted, stopping.")
+        exit_reason = "user_quit"
+    except Exception:
+        exit_reason = "error"
+        raise
     finally:
         cap.release()
         if args.show:
             cv2.destroyAllWindows()
+        if video_writer is not None:
+            video_writer.release()
+        if args.mqtt:
+            mqtt_close()
+        logger.close(frame_count=frame_idx, exit_reason=exit_reason)
 
     print(f"Processed {frame_idx} frames from {source_desc}.")
     return 0
@@ -369,10 +499,28 @@ def main() -> int:
              "modules.followme_orchestrator.configure()) or --modules register.",
     )
     parser.add_argument(
+        "--mqtt", action="store_true",
+        help="--modules followme only: publish each frame's FollowMeCommand over MQTT (see "
+             "modules/mqtt_bridge) for a Pi 4 motor controller to consume — see "
+             "docs/mqtt_handoff_pi4.md. Uses the SAME --config path as "
+             "modules.followme_orchestrator.configure() (mqtt_bridge's own mqtt_bridge: section). "
+             "Off by default; when omitted, mqtt_bridge is never imported and behavior is "
+             "identical to today.",
+    )
+    parser.add_argument(
         "--person-name",
         help="--modules register only: register just this one person headlessly, no UI. Omit "
              "entirely to open the Tkinter registration UI instead (list/register/re-capture/"
-             "delete people interactively).",
+             "delete people interactively). Mutually exclusive with --interactive.",
+    )
+    parser.add_argument(
+        "--interactive", action="store_true",
+        help="--modules register only: open an interactive console instead (list/register "
+             "<name>/delete <name>/quit) — the headless equivalent of the Tkinter UI's CRUD, no "
+             "display needed at all. See plans/11_registration_interactive_console.md and "
+             "docs/commands.md's \"Registration console\" section. Mutually exclusive with "
+             "--person-name and --then-followme (no single person is chosen in a console "
+             "session, unlike the other two register paths).",
     )
     parser.add_argument(
         "--front-samples", type=int, default=15,
@@ -388,28 +536,110 @@ def main() -> int:
              "immediately continue into camera followme mode (as if --mode camera --modules "
              "followme had been run right after). Skipped entirely if registration itself fails. "
              "The UI path (no --person-name) does this interactively instead, via its own "
-             "\"Follow Me\" button.",
+             "\"Follow Me\" button. Not supported with --interactive.",
     )
     parser.add_argument(
         "--debug", action="store_true",
         help="Enable the full per-phase debug overlay: face bbox + ROI region + the hand-keypoint "
              "gesture method's keypoints/skeleton/state for --modules pretrigger; all of that "
-             "PLUS target_tracking's bbox/center-line/reverify readout and target_recovery's "
-             "search status for --modules followme (via "
-             "modules.followme_orchestrator.draw_debug(), which composes each module's own "
-             "draw_debug() — see docs/architecture.md).",
+             "PLUS autocar_adapter's tracked/reacquired bbox, center-line, and state readout for "
+             "--modules followme (via modules.followme_orchestrator.draw_debug(), which composes "
+             "each module's own draw_debug() — see docs/architecture.md).",
     )
     parser.add_argument("--show", action="store_true", help="Display frames in a window while processing.")
+    parser.add_argument(
+        "--save-video", action="store_true",
+        help="Save the annotated debug overlay to runs/<run_id>/debug.avi (MJPG), independent of "
+             "--show — works headlessly over SSH, no window needed. Used when --modules "
+             "pretrigger or followme. The overlay is drawn even without --show whenever this is "
+             "set, so the saved video always matches what --debug/--show would have displayed.",
+    )
+    parser.add_argument(
+        "--log-dir", default="runs",
+        help="Directory to write per-run structured logs into (runs/<timestamp>_<mode>/"
+             "meta.json + decisions.jsonl — see plans/10_debug_logging_observability.md). Used "
+             "when --modules pretrigger, followme, or register --person-name (see "
+             "plans/11_registration_interactive_console.md chunk 7). Always on — this is what "
+             "makes a headless SSH run reviewable afterward without --show.",
+    )
+    parser.add_argument(
+        "--stream", action="store_true",
+        help="Publish the live debug overlay over HTTP at 127.0.0.1:8080 (see debug_stream.py) — "
+             "for watching a headless SSH run live, as an alternative to --show which needs a "
+             "display attached. View via an SSH local port-forward "
+             "(ssh -L 8080:localhost:8080 <host>), then open http://127.0.0.1:8080/. Independent "
+             "of --show/--save-video — any combination works. Used for --modules pretrigger, "
+             "followme, or register --person-name (registration's ROI/person-count capture "
+             "overlay, which also gains --show gating from this same change — see "
+             "register_person.py's own run()).",
+    )
     args = parser.parse_args()
 
-    if args.modules == "register":
-        import register_person
+    if args.interactive and args.person_name:
+        parser.error("--interactive and --person-name are mutually exclusive.")
+    if args.interactive and args.then_followme:
+        parser.error(
+            "--then-followme has no meaning with --interactive: it means \"whoever was just "
+            "registered\", but a console session can register zero, one, or many people. Use the "
+            "console's own 'follow <name>' command instead to pick exactly who to follow."
+        )
+    if args.stream and args.modules == "register" and not args.person_name and not args.interactive:
+        # Auto-select the interactive console rather than erroring: --stream's whole point is a
+        # headless-capable path, and between the two headless-capable register paths, the console
+        # is the strictly more capable one (list/register/delete/follow) — there's no reason to
+        # force the operator to also type --interactive by hand just to unblock --stream on its
+        # own. Still explicit in the printed output, not silent, so it's never a surprise.
+        args.interactive = True
+        print("Note: --stream needs --person-name or --interactive under --modules register; "
+              "opening the interactive console (pass --interactive explicitly to skip this note).")
 
-        if args.person_name:
-            # Headless path — register exactly this one person, no GUI.
-            result = register_person.run(
-                args.person_name, args.camera_index, args.front_samples, args.back_samples, args.config,
-            )
+    if args.modules == "register":
+        from scripts import register_person
+
+        if args.interactive:
+            # Interactive console path — the headless equivalent of the Tkinter UI's CRUD, now
+            # including its own 'follow <name>' command (register_person.run_interactive()) as
+            # the console's answer to Tkinter's "Follow Me" button — see that function's own
+            # docstring. chosen_name is None unless 'follow <name>' was used, in which case this
+            # falls through into the SAME followme camera loop the other two register paths
+            # share, exactly like they do.
+            stream = DebugStreamServer() if args.stream else None
+            if stream is not None:
+                print(f"streaming to {stream.start()}")
+            logger = RunLogger(log_root=args.log_dir)
+            run_dir = logger.start("register", sys.argv[1:], f"camera:{args.camera_index}", args.config)
+            print(f"logging to {run_dir}")
+            try:
+                result, chosen_name = register_person.run_interactive(
+                    args.camera_index, args.front_samples, args.back_samples, args.config,
+                    stream=stream, logger=logger,
+                )
+            finally:
+                if stream is not None:
+                    stream.stop()
+            if result != 0 or not chosen_name:
+                return result
+            print(f"\n'{chosen_name}' selected — continuing into followme mode.")
+
+        elif args.person_name:
+            # Headless path — register exactly this one person, no GUI. show=args.show, same
+            # --show convention as pretrigger/followme (register_person.run()'s own default is
+            # also False now — see that function's docstring for why the old always-show default
+            # was a real gap, not just a style choice).
+            stream = DebugStreamServer() if args.stream else None
+            if stream is not None:
+                print(f"streaming to {stream.start()}")
+            logger = RunLogger(log_root=args.log_dir)
+            run_dir = logger.start("register", sys.argv[1:], f"camera:{args.camera_index}", args.config)
+            print(f"logging to {run_dir}")
+            try:
+                result = register_person.run(
+                    args.person_name, args.camera_index, args.front_samples, args.back_samples,
+                    args.config, show=args.show, stream=stream, logger=logger,
+                )
+            finally:
+                if stream is not None:
+                    stream.stop()
             if result != 0 or not args.then_followme:
                 return result
             chosen_name = args.person_name
@@ -454,9 +684,23 @@ def main() -> int:
     # which pipeline produced the lines that follow it.
     print(f"mode={args.modules.upper()} source={source_desc} show={args.show} debug={args.debug}")
 
-    if args.modules == "pretrigger":
-        return run_pretrigger_pipeline(cap, args, source_desc)
-    return run_followme_pipeline(cap, args, source_desc)
+    logger = RunLogger(log_root=args.log_dir)
+    run_dir = logger.start(args.modules, sys.argv[1:], source_desc, args.config)
+    print(f"logging to {run_dir}")
+
+    stream = DebugStreamServer() if args.stream else None
+    if stream is not None:
+        stream_url = stream.start()
+        logger.set_stream_info(stream_url)
+        print(f"streaming to {stream_url}")
+
+    try:
+        if args.modules == "pretrigger":
+            return run_pretrigger_pipeline(cap, args, source_desc, logger, stream)
+        return run_followme_pipeline(cap, args, source_desc, logger, stream)
+    finally:
+        if stream is not None:
+            stream.stop()
 
 
 if __name__ == "__main__":

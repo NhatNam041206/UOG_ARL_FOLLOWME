@@ -40,6 +40,18 @@ _TRANSITIONS = {
     WAITING_CLOSE_2: (CLOSED, CONFIRMED),
 }
 
+# stage -> (opens consumed so far, closes consumed so far) in the CURRENT attempt — a pure
+# lookup, not separate counter state, since the fixed OPEN->CLOSE->OPEN->CLOSE progression already
+# determines these counts from the stage name alone. Logging/debug use only (e.g. distinguishing
+# "stuck restarting the first open" from "stuck on the second close").
+STAGE_COUNTS = {
+    WAITING_OPEN: (0, 0),
+    WAITING_CLOSE_1: (1, 0),
+    WAITING_OPEN_2: (1, 1),
+    WAITING_CLOSE_2: (2, 1),
+    CONFIRMED: (2, 2),
+}
+
 
 @dataclass
 class SequenceStateMachine:
