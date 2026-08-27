@@ -117,8 +117,8 @@ mqtt_bridge:
                               # while null: configure() logs a warning, publish() always returns
                               # False without attempting to connect.
   broker_port: 1883
-  topic: "autobot/control/followme"
-  publish_hz: null           # REQUIRED, uncalibrated — starting range discussed: 5-15 Hz. Must be
+  topic: "car/raspi5/control"
+  publish_hz: 15           # REQUIRED, uncalibrated — starting range discussed: 5-15 Hz. Must be
                               # empirically tuned against real servo response + network latency on
                               # actual hardware, not assumed.
 
