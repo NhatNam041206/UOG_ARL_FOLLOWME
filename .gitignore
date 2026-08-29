@@ -27,16 +27,16 @@ modules/*/models/*.pt
 # re-identification profiles (front/back head + lower-body appearance embeddings). Kept out of
 # git by default since these identify a real person; remove these lines if you actually want them
 # backed up in this repo.
-modules/face_identity/raw_captures/*
-!modules/face_identity/raw_captures/.gitkeep
-modules/face_identity/registry_data/*.npz
-modules/*/models/*.npz
+# modules/face_identity/raw_captures/*
+# !modules/face_identity/raw_captures/.gitkeep
+# modules/face_identity/registry_data/*.npz
+# modules/*/models/*.npz
 # scripts/register_person.py's own raw capture output (front+back frames, both consumers' Phase 2 input)
-registration_captures/
+# registration_captures/
 
 # Autocar vendor tree (modules/autocar) — abandoned GRU wave-classifier training data, not
 # wired into any code path (confirmed unused before vendoring); no reason to version it here.
-modules/autocar/data/*.npz
+# modules/autocar/data/*.npz
 
 # identity/session_back_dataset.py (their code, commit 8037862+) writes a live back-of-head
 # dataset here — its own SESSION_BACK_DATASET_DIR is CWD-relative ("temp_dataset"), and our
