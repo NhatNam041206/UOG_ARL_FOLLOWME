@@ -19,8 +19,8 @@ Thumbs.db
 # vendored code; see docs/architecture.md's "A note on model file locations")
 yolov8n-pose.pt
 # modules/*/models/*.onnx
-modules/*/models/*.task
-modules/*/models/*.pth
+# modules/*/models/*.task
+# modules/*/models/*.pth
 modules/*/models/*.pt
 
 # Personal biometric data — captured face photos and their embeddings, and enrolled
