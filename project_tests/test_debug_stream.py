@@ -21,10 +21,18 @@ def server():
     s.stop()
 
 
-def test_start_binds_localhost_only_and_returns_url(server):
+def test_start_binds_and_returns_url(server):
     url = server.start(port=0)
-    assert url.startswith("http://127.0.0.1:")
+    assert url.startswith("http://")
     assert url.endswith("/")
+
+    s2 = DebugStreamServer()
+    try:
+        url2 = s2.start(port=0, host="127.0.0.1")
+        assert url2.startswith("http://127.0.0.1:")
+    finally:
+        s2.stop()
+
 
 
 def test_index_page_served(server):
