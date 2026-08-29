@@ -50,6 +50,8 @@ class PipelineResult(NamedTuple):
     should_move: bool
     steering_angle_degrees: Optional[float]
     debug_state: str
+    is_finished: bool = False
+    target_reached_remaining_seconds: Optional[float] = None
 
 
 class FollowMeOrchestratorPipeline:
@@ -79,6 +81,9 @@ class FollowMeOrchestratorPipeline:
 
         self._tracking_active = False
         self._target_person_name: Optional[str] = None
+        self._target_reached_since: Optional[float] = None
+        self._last_timestamp: Optional[float] = None
+
 
         # Debug/visualization convenience only — the current tracked/reacquired bbox, from
         # autocar_adapter's own PUBLIC result fields (never a private reach-in from HERE; the one
@@ -159,8 +164,10 @@ class FollowMeOrchestratorPipeline:
                 self._target_person_name = face.matched_person_name
                 self.last_person_bbox = (px, py, pw, ph)
                 self.steering.reset()
+                self._target_reached_since = None
                 return PipelineResult(False, None, "TRACKING_STARTED")
 
+        self._target_reached_since = None
         return PipelineResult(False, None, "WAITING_FOR_TRIGGER")
 
     def _step_post_trigger(self, frame: np.ndarray, timestamp: float) -> PipelineResult:
@@ -171,6 +178,7 @@ class FollowMeOrchestratorPipeline:
         site exists anymore."""
         self._debug_pretrigger = []
         self._debug_gesture_bbox = None
+        self._last_timestamp = timestamp
 
         result = tracking_update(frame, timestamp)
         self._debug_tracking_result = result
@@ -183,7 +191,21 @@ class FollowMeOrchestratorPipeline:
             if result.person_bbox is not None:
                 self.last_person_bbox = result.person_bbox
                 if self._is_target_reached(result.person_bbox, frame.shape[:2]):
-                    return PipelineResult(False, None, "TARGET_REACHED")
+                    if self._target_reached_since is None:
+                        self._target_reached_since = timestamp
+                    elapsed = timestamp - self._target_reached_since
+                    buffer_sec = self.config.target_reached_buffer_seconds
+                    if buffer_sec is not None:
+                        remaining = max(0.0, buffer_sec - elapsed)
+                        if elapsed >= buffer_sec:
+                            return PipelineResult(False, None, "TARGET_REACHED", is_finished=True, target_reached_remaining_seconds=0.0)
+                        return PipelineResult(False, None, "TARGET_REACHED", is_finished=False, target_reached_remaining_seconds=remaining)
+                    return PipelineResult(False, None, "TARGET_REACHED", is_finished=False, target_reached_remaining_seconds=None)
+                else:
+                    self._target_reached_since = None
+            else:
+                self._target_reached_since = None
+
             if result.horizontal_offset is not None and self.steering.is_calibrated():
                 angle = self.steering.update(result.horizontal_offset, timestamp)
                 return PipelineResult(True, angle, result.state)
@@ -191,6 +213,8 @@ class FollowMeOrchestratorPipeline:
             # convention in this project): steering gains/FOV not yet set -> should_move forced
             # False even though the target is still genuinely being tracked.
             return PipelineResult(False, None, f"{result.state}_STEERING_UNCALIBRATED")
+
+        self._target_reached_since = None
 
         if result.state == "SEARCHING":
             return PipelineResult(False, None, "RECOVERING")
@@ -291,4 +315,15 @@ class FollowMeOrchestratorPipeline:
             cv2.line(frame, (0, horizon_y), (frame_w, horizon_y), (100, 200, 255), 1)
             cv2.putText(frame, "target_reached_horizon", (10, max(15, horizon_y - 5)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1)
+
+            if self._target_reached_since is not None and self.config.target_reached_buffer_seconds is not None:
+                ts = self._last_timestamp if self._last_timestamp is not None else 0.0
+                elapsed = max(0.0, ts - self._target_reached_since)
+                remaining = max(0.0, self.config.target_reached_buffer_seconds - elapsed)
+                cv2.putText(
+                    frame, f"TARGET REACHED: {remaining:.1f}s to exit",
+                    (10, min(frame_h - 10, horizon_y + 25)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2
+                )
+
 

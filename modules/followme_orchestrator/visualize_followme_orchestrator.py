@@ -27,7 +27,7 @@ _STATE_COLOR = {
     "WAITING_FOR_TRIGGER": (180, 180, 180),
     "TRACKING_STARTED": (0, 220, 255),
     "TRACKING": (0, 200, 0),
-    "TARGET_REACHED": (255, 255, 0),
+    "TARGET_REACHED": (0, 220, 255),
     "TRACKING_STEERING_UNCALIBRATED": (0, 160, 255),
     "RECOVERING": (0, 140, 255),
     "STOPPED": (0, 0, 255),
@@ -88,6 +88,8 @@ def main() -> int:
             angle_str = f"{result.steering_angle_degrees:+.1f}deg" if result.steering_angle_degrees is not None else "None"
             label1 = f"state={result.debug_state}"
             label2 = f"should_move={result.should_move}  steering={angle_str}"
+            if result.debug_state == "TARGET_REACHED" and result.target_reached_remaining_seconds is not None:
+                label2 += f"  buffer={result.target_reached_remaining_seconds:.1f}s"
             cv2.putText(frame, label1, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             cv2.putText(frame, label2, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             # `result` (PipelineResult) has the same should_move/steering_angle_degrees fields
@@ -99,6 +101,10 @@ def main() -> int:
                 f"frame={frame_idx:06d} debug_state={result.debug_state:28s} "
                 f"should_move={result.should_move} steering_angle_degrees={result.steering_angle_degrees}"
             )
+
+            if result.is_finished:
+                print("\nTarget reached and confirmed for buffer duration. Stopping.")
+                break
 
             cv2.imshow("visualize_followme_orchestrator", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):

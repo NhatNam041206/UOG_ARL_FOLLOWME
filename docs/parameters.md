@@ -330,6 +330,7 @@ Gating parameters for the proximity stopping condition (`debug_state = TARGET_RE
 |---|---|---|---|---|
 | `target_reached_horizon_y_ratio` | 0.15 | 🟢 | Frame-fraction threshold on the Y-axis. In OpenCV coordinates, $y=0$ is the top edge; as a person gets closer to the camera, the top of their head/bbox ($py$) moves upward towards 0 ($py / \text{frame\_h} \le \text{ratio}$). | Adjust to determine how high on screen the subject's head must reach to trigger stopping. |
 | `target_reached_min_bbox_proportion` | 0.35 | 🟢 | Minimum proportion of the frame area occupied by the person's bounding box ($(\text{pw} \times \text{ph}) / (\text{frame\_w} \times \text{frame\_h}) \ge \text{ratio}$). | Increase if the robot stops too far away; decrease if the robot gets uncomfortably close before stopping. |
+| `target_reached_buffer_seconds` | 5.0 | 🟢 | Continuous time buffer (seconds) the target must remain reached before the episode/program completes (`is_finished=True`, `exit_reason="target_reached"`). Set `null` to hold indefinitely without auto-exiting. | Adjust if the program ends too quickly or takes too long to confirm. Reset if the target steps back before expiration. |
 
 ---
 
