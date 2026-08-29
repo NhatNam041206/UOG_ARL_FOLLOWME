@@ -25,7 +25,7 @@ emergency_stop:
 # Used by main.py (--mode camera) and followme_orchestrator.SteeringController — see
 # docs/parameters.md#camera.
 camera:
-  camera_index: 1
+  camera_index: 0
   fov_degrees: 85.0
   lens_type: "hybrid"
   focus_type: "fixed"
