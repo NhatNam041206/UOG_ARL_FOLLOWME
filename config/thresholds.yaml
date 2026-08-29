@@ -32,16 +32,18 @@ camera:
 
 # PID steering (followme_orchestrator.SteeringController) — see docs/parameters.md#steering-plans08--followme_orchestratorsteeringcontroller.
 steering:
-  kp: 1.0
-  ki: 0.5
-  kd: 0.5
+  kp: 1.5
+  ki: 0.05
+  kd: 0.05
   max_steering_angle_degrees: 45.0
   servo_center_degrees: 90.0
 
 # FollowMe Orchestrator proximity stop thresholds (TARGET_REACHED) — see docs/parameters.md#followme_orchestrator.
 followme_orchestrator:
-  target_reached_horizon_y_ratio: 0.05          # Top of person bbox touches/crosses horizon (py / frame_h <= ratio)
-  target_reached_min_bbox_proportion: 0.5      # Proportion of bbox area (pw * ph / (frame_w * frame_h) >= ratio)
+  target_reached_horizon_y_ratio: 0.15          # Top of person bbox touches/crosses horizon (py / frame_h <= ratio)
+  target_reached_min_bbox_proportion: 0.35      # Proportion of bbox area (pw * ph / (frame_w * frame_h) >= ratio)
+  target_reached_buffer_seconds: 3.5            # Time buffer (seconds) to hold TARGET_REACHED before program finishes (null = never finish)
+
 
 
 # Standalone detector used internally by target_tracking/target_recovery — see

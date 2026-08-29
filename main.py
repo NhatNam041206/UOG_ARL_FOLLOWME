@@ -336,7 +336,7 @@ _FOLLOWME_STATE_COLOR = {
     "WAITING_FOR_TRIGGER": (180, 180, 180),
     "TRACKING_STARTED": (0, 220, 255),
     "TRACKING": (0, 200, 0),
-    "TARGET_REACHED": (255, 255, 0),
+    "TARGET_REACHED": (0, 220, 255),
     "TRACKING_STEERING_UNCALIBRATED": (0, 160, 255),
     "RECOVERING": (0, 140, 255),
     "STOPPED": (0, 0, 255),
@@ -407,6 +407,8 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
             logger.log_frame(
                 frame=frame_idx, ts=timestamp, debug_state=command.debug_state,
                 should_move=command.should_move, steering_angle_degrees=command.steering_angle_degrees,
+                target_reached_remaining_sec=command.target_reached_remaining_seconds,
+                is_finished=command.is_finished,
                 **debug_snapshot(),
             )
 
@@ -416,14 +418,26 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
                     # summary text below isn't occluded by it — same layering convention as
                     # run_pretrigger_pipeline.
                     draw_debug(frame)
-                draw_lines(frame, [
+                status_lines = [
                     f"state={command.debug_state}",
                     f"should_move={command.should_move}  steering={angle_str}deg",
-                ], 30, color)
+                ]
+                if command.debug_state == "TARGET_REACHED" and command.target_reached_remaining_seconds is not None:
+                    status_lines.append(f"buffer={command.target_reached_remaining_seconds:.1f}s")
+                draw_lines(frame, status_lines, 30, color)
                 # The calculated direction to the person — drawn regardless of --debug (it's the
                 # actual robot command, not a per-phase debug readout); no-ops on its own when
                 # should_move is False, so it simply doesn't appear while stopped.
                 draw_steering_arrow(frame, command)
+
+            if command.is_finished:
+                print("\nTarget reached and confirmed for buffer duration. Program finished.")
+                exit_reason = "target_reached"
+                if video_writer is not None:
+                    video_writer.write(frame)
+                if stream is not None:
+                    stream.update_frame(frame)
+                break
 
             if video_writer is not None:
                 video_writer.write(frame)
@@ -437,6 +451,7 @@ def run_followme_pipeline(cap, args: argparse.Namespace, source_desc: str, logge
                     break
 
             frame_idx += 1
+
     except KeyboardInterrupt:
         # A legitimate way to stop a headless run: with no --show, there's no 'q'-key path at
         # all (cv2.waitKey() is never even called), so Ctrl+C is the ONLY way to stop a --mode

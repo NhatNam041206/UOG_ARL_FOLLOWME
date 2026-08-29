@@ -64,6 +64,9 @@ class FollowMeCommand:
                                               # "TRACKING_STEERING_UNCALIBRATED", "RECOVERING",
                                               # "STOPPED") — exact state names are this module's
                                               # own design choice, not fixed by the originating spec
+    is_finished: bool = False                # True only when TARGET_REACHED buffer has elapsed
+                                              # and the episode/program is fully completed
+    target_reached_remaining_seconds: Optional[float] = None  # Remaining seconds in TARGET_REACHED buffer
 
 
 _pipeline_singleton: Optional[FollowMeOrchestratorPipeline] = None
@@ -99,7 +102,10 @@ def step(frame: np.ndarray, timestamp: float) -> FollowMeCommand:
         should_move=result.should_move,
         steering_angle_degrees=result.steering_angle_degrees,
         debug_state=result.debug_state,
+        is_finished=result.is_finished,
+        target_reached_remaining_seconds=result.target_reached_remaining_seconds,
     )
+
 
 
 def debug_snapshot() -> dict:

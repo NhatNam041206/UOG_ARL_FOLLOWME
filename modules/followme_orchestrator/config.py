@@ -38,6 +38,7 @@ class FollowMeOrchestratorConfig:
     # Target reached thresholds (None = feature disabled / uncalibrated)
     target_reached_horizon_y_ratio: Optional[float] = None
     target_reached_min_bbox_proportion: Optional[float] = None
+    target_reached_buffer_seconds: Optional[float] = None
 
     def missing_keys(self) -> List[str]:
         return [k for k in REQUIRED_KEYS if getattr(self, k) is None]
@@ -64,5 +65,7 @@ def load_config(thresholds_path: str = "config/thresholds.yaml") -> FollowMeOrch
         servo_center_degrees=steering_section.get("servo_center_degrees", DEFAULT_SERVO_CENTER_DEGREES),
         target_reached_horizon_y_ratio=orchestrator_section.get("target_reached_horizon_y_ratio"),
         target_reached_min_bbox_proportion=orchestrator_section.get("target_reached_min_bbox_proportion"),
+        target_reached_buffer_seconds=orchestrator_section.get("target_reached_buffer_seconds"),
     )
+
 
