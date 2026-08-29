@@ -131,6 +131,7 @@ own copy of the state→color mapping (`_FOLLOWME_STATE_COLOR`, matched to
 | `WAITING_FOR_TRIGGER` | Gray | `(180, 180, 180)` |
 | `TRACKING_STARTED` | Yellow | `(0, 220, 255)` |
 | `TRACKING` | Green | `(0, 200, 0)` |
+| `TARGET_REACHED` | Cyan | `(255, 255, 0)` |
 | `TRACKING_STEERING_UNCALIBRATED` | Orange | `(0, 160, 255)` |
 | `RECOVERING` | Orange-red | `(0, 140, 255)` |
 | `STOPPED` | Red | `(0, 0, 255)` |

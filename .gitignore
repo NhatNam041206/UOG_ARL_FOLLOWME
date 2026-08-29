@@ -17,7 +17,7 @@ Thumbs.db
 # ultralytics auto-download cache — YOLOv8PoseTorch's default weights, lands at repo root (NOT
 # models/ — modules/autocar/config.py hardcodes this as a bare, cwd-relative filename inside
 # vendored code; see docs/architecture.md's "A note on model file locations")
-/yolov8n-pose.pt
+yolov8n-pose.pt
 modules/*/models/*.onnx
 modules/*/models/*.task
 modules/*/models/*.pth

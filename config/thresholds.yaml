@@ -25,7 +25,7 @@ emergency_stop:
 # Used by main.py (--mode camera) and followme_orchestrator.SteeringController — see
 # docs/parameters.md#camera.
 camera:
-  camera_index: 2
+  camera_index: 0
   fov_degrees: 85.0
   lens_type: "hybrid"
   focus_type: "fixed"
@@ -37,6 +37,12 @@ steering:
   kd: 0.5
   max_steering_angle_degrees: 45.0
   servo_center_degrees: 90.0
+
+# FollowMe Orchestrator proximity stop thresholds (TARGET_REACHED) — see docs/parameters.md#followme_orchestrator.
+followme_orchestrator:
+  target_reached_horizon_y_ratio: 0.05          # Top of person bbox touches/crosses horizon (py / frame_h <= ratio)
+  target_reached_min_bbox_proportion: 0.5      # Proportion of bbox area (pw * ph / (frame_w * frame_h) >= ratio)
+
 
 # Standalone detector used internally by target_tracking/target_recovery — see
 # docs/parameters.md#human_detection.
@@ -103,15 +109,14 @@ autocar:
   # reid_model_path: "modules/autocar/models/osnet_x1_0_msmt17.onnx"
   # face_detector_model_path: "modules/autocar/models/face_detection_yunet_2023mar.onnx"
   # face_recognizer_model_path: "modules/autocar/models/face_recognition_sface_2021dec.onnx"
-
-  recovery_timeout_seconds: null  # ours, not theirs — see docs/parameters.md
+  recovery_timeout_seconds: 2  # ours, not theirs — see docs/parameters.md
 
 # MQTT drive-command publisher (Rasp 5 -> Pi 4 motor controller) — see
 # docs/parameters.md#mqtt_bridge and docs/mqtt_handoff_pi4.md for the Pi 4 subscriber's copy of
 # the wire contract. Reuses steering.servo_center_degrees (above) for the "stopped" angle;
 # does NOT duplicate it here.
 mqtt_bridge:
-  broker_host: null          # REQUIRED — Pi 4's IP address on the shared network. Fail-closed
+  broker_host: 192.168.10.10          # REQUIRED — Pi 4's IP address on the shared network. Fail-closed
                               # while null: configure() logs a warning, publish() always returns
                               # False without attempting to connect.
   broker_port: 1883

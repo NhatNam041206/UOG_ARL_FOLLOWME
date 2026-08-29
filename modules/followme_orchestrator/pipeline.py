@@ -22,7 +22,9 @@ itself a single-episode module-level singleton).
 import logging
 from typing import List, NamedTuple, Optional, Tuple
 
+import cv2
 import numpy as np
+
 
 import modules.face_identity.interface as face_identity_interface
 import modules.human_detection_roi.interface as human_detection_roi_interface
@@ -180,6 +182,8 @@ class FollowMeOrchestratorPipeline:
                 self.steering.reset()
             if result.person_bbox is not None:
                 self.last_person_bbox = result.person_bbox
+                if self._is_target_reached(result.person_bbox, frame.shape[:2]):
+                    return PipelineResult(False, None, "TARGET_REACHED")
             if result.horizontal_offset is not None and self.steering.is_calibrated():
                 angle = self.steering.update(result.horizontal_offset, timestamp)
                 return PipelineResult(True, angle, result.state)
@@ -202,6 +206,35 @@ class FollowMeOrchestratorPipeline:
 
         # Defensive fallback — autocar_adapter's state is always one of the three handled above.
         return PipelineResult(False, None, "UNKNOWN_TRACKING_STATE")
+
+    def _is_target_reached(self, person_bbox: Optional[BboxXYWH], frame_shape: Tuple[int, int]) -> bool:
+        """
+        Evaluates whether the tracked person is close enough to be considered 'TARGET_REACHED':
+        1. Top of person bbox (y-axis) reaches or crosses above the horizon line:
+           py / frame_h <= target_reached_horizon_y_ratio
+           (In OpenCV image coordinates, y=0 is top, so moving closer moves py upward towards 0).
+        2. Bbox area proportion reaches or exceeds the threshold:
+           (pw * ph) / (frame_w * frame_h) >= target_reached_min_bbox_proportion
+        """
+        if person_bbox is None:
+            return False
+        if (self.config.target_reached_horizon_y_ratio is None or
+                self.config.target_reached_min_bbox_proportion is None):
+            return False
+
+        frame_h, frame_w = frame_shape[:2]
+        if frame_h <= 0 or frame_w <= 0:
+            return False
+
+        px, py, pw, ph = person_bbox
+
+        top_y_ratio = py / float(frame_h)
+        horizon_reached = top_y_ratio <= self.config.target_reached_horizon_y_ratio
+
+        bbox_area_ratio = (pw * ph) / float(frame_w * frame_h)
+        proportion_reached = bbox_area_ratio >= self.config.target_reached_min_bbox_proportion
+
+        return horizon_reached and proportion_reached
 
     def debug_snapshot(self) -> dict:
         """
@@ -251,3 +284,11 @@ class FollowMeOrchestratorPipeline:
 
         if self._debug_tracking_result is not None:
             self._debug_tracking_result.draw_debug(frame)
+
+        if self.config.target_reached_horizon_y_ratio is not None:
+            frame_h, frame_w = frame.shape[:2]
+            horizon_y = int(self.config.target_reached_horizon_y_ratio * frame_h)
+            cv2.line(frame, (0, horizon_y), (frame_w, horizon_y), (100, 200, 255), 1)
+            cv2.putText(frame, "target_reached_horizon", (10, max(15, horizon_y - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1)
+
