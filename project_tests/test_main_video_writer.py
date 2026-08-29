@@ -1,16 +1,27 @@
 """
-Unit tests for main.open_debug_video_writer — real cv2.VideoWriter, no CV models/mediapipe/
+Unit tests for main.open_debug_video_writer -- real cv2.VideoWriter, no CV models/mediapipe/
 onnxruntime needed (unlike main.py's actual per-frame pipelines, which this dev environment can't
-import — see plans/10_debug_logging_observability.md chunk 5's verification note).
+import -- see plans/10_debug_logging_observability.md chunk 5's verification note).
 
 Run with:
     python -m pytest project_tests/test_main_video_writer.py -v
 """
 import os
+import sys
 
 import cv2
 import numpy as np
 import pytest
+
+# Ensure root directory's main.py is loaded, not modules/autocar/main.py
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _ROOT not in sys.path or sys.path.index(_ROOT) > 0:
+    if _ROOT in sys.path:
+        sys.path.remove(_ROOT)
+    sys.path.insert(0, _ROOT)
+
+if "main" in sys.modules and not hasattr(sys.modules["main"], "open_debug_video_writer"):
+    del sys.modules["main"]
 
 from main import open_debug_video_writer
 
@@ -43,7 +54,6 @@ def test_uses_reported_fps_and_resolution(tmp_path):
 
 
 def test_falls_back_when_fps_unreported(tmp_path):
-    """Many webcams report 0 for CAP_PROP_FPS — must not produce a 0-fps (unplayable) video."""
     cap = _FakeCap(fps=0.0, width=640, height=480)
     writer, video_path, fps, resolution = open_debug_video_writer(cap, str(tmp_path))
 

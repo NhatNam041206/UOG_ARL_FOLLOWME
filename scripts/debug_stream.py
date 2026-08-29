@@ -18,6 +18,7 @@ every 3rd), and JPEG quality defaults to 70 — full-rate full-quality streaming
 the inference loop for CPU on a Pi, which is the one thing this tool must not do (see the
 --save-video design rationale this mirrors, in main.py's open_debug_video_writer()).
 """
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,19 @@ _INDEX_HTML = (
     b'<img src="/stream.mjpg" style="width:100%;display:block">'
     b"</body></html>"
 )
+
+
+def _get_local_ip() -> str:
+    """Best-effort discovery of the machine's primary LAN IP for display in stream URLs."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 
 
 class _FrameBuffer:
@@ -121,12 +135,13 @@ class DebugStreamServer:
         self._jpeg_quality = 70
         self._throttle_every_n_frames = 3
 
-    def start(self, port: int = 8080, host: str = "127.0.0.1",
+    def start(self, port: int = 8080, host: str = "0.0.0.0",
               throttle_every_n_frames: int = 3, jpeg_quality: int = 70,
               min_interval_seconds: float = 0.05) -> str:
-        """Starts the server in a background daemon thread. `port=0` lets the OS pick a free
-        port (used by tests to avoid collisions) — the URL returned always reflects the actual
-        bound port. Returns the viewable URL."""
+        """Starts the server in a background daemon thread. Binds to `host` (`0.0.0.0` by default,
+        accessible across the local network / Wi-Fi). `port=0` lets the OS pick a free port (used
+        by tests to avoid collisions) — the URL returned reflects the actual bound port and primary
+        reachable IP. Returns the viewable URL."""
         self._jpeg_quality = jpeg_quality
         self._throttle_every_n_frames = max(1, throttle_every_n_frames)
         handler_cls = _make_handler(self._buffer, min_interval_seconds)
@@ -134,7 +149,9 @@ class DebugStreamServer:
         self._httpd.daemon_threads = True  # per-connection streaming threads must not block process exit
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
-        return f"http://{host}:{self._httpd.server_port}/"
+        display_host = _get_local_ip() if host == "0.0.0.0" else host
+        return f"http://{display_host}:{self._httpd.server_port}/"
+
 
     def update_frame(self, frame: np.ndarray) -> None:
         """Called once per pipeline frame. Throttled internally — only every
