@@ -236,6 +236,8 @@ and driven by `modules/followme_orchestrator/autocar_adapter.py`. `target_tracki
 flowchart TD
     W["followme_orchestrator.step(frame, ts)\nWAITING_FOR_TRIGGER: runs the face-first\npre-trigger sequence every call (see diagram above)"] -->|"gesture TRIGGER goes GREEN"| S["autocar_adapter.start(person_name, initial_bbox, frame, ts)\nforce-locks via one IoU-matched detect+track pass\n(skips their own ACQUIRING — identity already proven)"]
     S --> TRK["TRACKING\nhorizontal_offset every frame -> SteeringController.update()\n(their TargetLock trusts the ByteTrack id while it's present — zero re-id cost)"]
+    TRK -->|"target close (horizon reached & bbox proportion met)"| REACHED["TARGET_REACHED\nshould_move=False, steering_angle_degrees=None\n(maintains lock, stops driving)"]
+    REACHED -->|"target moves back / steps away"| TRK
     TRK -->|"locked track_id vanishes\n(e.g. occlusion)"| SEARCH["SEARCHING\ntheir TargetLock's own reclaim logic, checked every update():\nany BRAND-NEW track this frame vs. the enrolled profile"]
     SEARCH -->|reclaimed via a re-id match| TRK
     SEARCH -->|recovery_timeout_seconds elapsed| LOST["state = LOST\nshould_move=False, debug_state=STOPPED"]

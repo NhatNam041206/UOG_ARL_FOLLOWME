@@ -35,6 +35,10 @@ class FollowMeOrchestratorConfig:
     lens_type: Optional[str] = None
     focus_type: Optional[str] = None
 
+    # Target reached thresholds (None = feature disabled / uncalibrated)
+    target_reached_horizon_y_ratio: Optional[float] = None
+    target_reached_min_bbox_proportion: Optional[float] = None
+
     def missing_keys(self) -> List[str]:
         return [k for k in REQUIRED_KEYS if getattr(self, k) is None]
 
@@ -47,6 +51,7 @@ def load_config(thresholds_path: str = "config/thresholds.yaml") -> FollowMeOrch
         thresholds = yaml.safe_load(f) or {}
     camera_section: Dict[str, Any] = thresholds.get("camera", {}) or {}
     steering_section: Dict[str, Any] = thresholds.get("steering", {}) or {}
+    orchestrator_section: Dict[str, Any] = thresholds.get("followme_orchestrator", {}) or {}
 
     return FollowMeOrchestratorConfig(
         fov_degrees=camera_section.get("fov_degrees"),
@@ -57,4 +62,7 @@ def load_config(thresholds_path: str = "config/thresholds.yaml") -> FollowMeOrch
         kd=steering_section.get("kd"),
         max_steering_angle_degrees=steering_section.get("max_steering_angle_degrees"),
         servo_center_degrees=steering_section.get("servo_center_degrees", DEFAULT_SERVO_CENTER_DEGREES),
+        target_reached_horizon_y_ratio=orchestrator_section.get("target_reached_horizon_y_ratio"),
+        target_reached_min_bbox_proportion=orchestrator_section.get("target_reached_min_bbox_proportion"),
     )
+

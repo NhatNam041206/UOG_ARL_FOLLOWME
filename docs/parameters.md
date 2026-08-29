@@ -322,6 +322,17 @@ revisit them once the actual servo/Ackermann rig is in hand.
 
 ---
 
+## `followme_orchestrator` (plans/08 — Proximity Stopping / `TARGET_REACHED`)
+
+Gating parameters for the proximity stopping condition (`debug_state = TARGET_REACHED`). When both conditions below are satisfied simultaneously while actively tracking, `should_move` becomes `False` and `steering_angle_degrees` becomes `None` (commanding the robot to stop forward motion while maintaining target lock).
+
+| Parameter | Current | Status | Meaning | Tuning notes |
+|---|---|---|---|---|
+| `target_reached_horizon_y_ratio` | 0.15 | 🟢 | Frame-fraction threshold on the Y-axis. In OpenCV coordinates, $y=0$ is the top edge; as a person gets closer to the camera, the top of their head/bbox ($py$) moves upward towards 0 ($py / \text{frame\_h} \le \text{ratio}$). | Adjust to determine how high on screen the subject's head must reach to trigger stopping. |
+| `target_reached_min_bbox_proportion` | 0.35 | 🟢 | Minimum proportion of the frame area occupied by the person's bounding box ($(\text{pw} \times \text{ph}) / (\text{frame\_w} \times \text{frame\_h}) \ge \text{ratio}$). | Increase if the robot stops too far away; decrease if the robot gets uncomfortably close before stopping. |
+
+---
+
 ## `mqtt_bridge` (`modules/mqtt_bridge`, `--mqtt` only)
 
 Publishes each frame's `FollowMeCommand` over MQTT to a Pi 4 motor controller — see

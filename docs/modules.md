@@ -387,14 +387,13 @@ covering trigger detection all the way through steering.
 **Public contract** (`FollowMeCommand`): `should_move` (bool, no speed parameter — speed is a
 separate downstream concern), `steering_angle_degrees` (signed, `None` when `should_move` is
 `False`), `debug_state` (this module's own state-name choices — `WAITING_FOR_TRIGGER`,
-`TRACKING_STARTED`, `TRACKING`, `TRACKING_STEERING_UNCALIBRATED`, `RECOVERING`, `STOPPED`).
+`TRACKING_STARTED`, `TRACKING`, `TARGET_REACHED`, `TRACKING_STEERING_UNCALIBRATED`, `RECOVERING`, `STOPPED`).
 `configure(...)` **must** be called before the first `step()` — see that function's own docstring.
 `draw_steering_arrow(frame, command)` draws the calculated steering direction as an arrow from
 bottom-center of the frame (0° = ahead, +/- = right/left) — not gated by `--debug`, since it's the
 actual robot command, not a per-module debug readout; no-ops while `should_move` is `False`.
 
-**Key parameters:** none of its own beyond what it composes — see `camera.fov_degrees` and the
-`steering` section below (owned by `SteeringController`).
+**Key parameters:** `followme_orchestrator.target_reached_horizon_y_ratio` and `target_reached_min_bbox_proportion` (proximity stopping / `TARGET_REACHED`), plus `camera.fov_degrees` and the `steering` section below (owned by `SteeringController`).
 
 **Known limitations:**
 - Inherits every composed module's own known limitations wholesale (ByteTrack motion-only

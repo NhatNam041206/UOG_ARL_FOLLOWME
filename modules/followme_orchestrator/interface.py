@@ -60,7 +60,7 @@ class FollowMeCommand:
                                               # (no meaningful steering target when stopped)
     debug_state: str                         # current high-level pipeline state, for logging/
                                               # visualization (e.g. "WAITING_FOR_TRIGGER",
-                                              # "TRACKING_STARTED", "TRACKING",
+                                              # "TRACKING_STARTED", "TRACKING", "TARGET_REACHED",
                                               # "TRACKING_STEERING_UNCALIBRATED", "RECOVERING",
                                               # "STOPPED") — exact state names are this module's
                                               # own design choice, not fixed by the originating spec
